@@ -327,8 +327,15 @@ fn lex_string(chars: &[char], mut i: usize, toks: &mut Vec<Tok>, fstring: bool) 
                 j += 1;
             }
             let inner: String = chars[start..j].iter().collect();
-            // Drop any format spec after ':' (e.g. {x:>10}).
-            let inner = inner.split(':').next().unwrap_or("").to_string();
+            // Keep only the expression: drop the format spec (`:...`), the
+            // conversion (`!r`/`!s`), and a trailing debug `=` (`{x=}`).
+            let inner = inner
+                .split(|c| c == ':' || c == '!')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_end_matches('=')
+                .to_string();
             let inner_toks = lex_line(&inner);
             toks.push(Tok::Plus);
             toks.push(Tok::LParen);
@@ -456,8 +463,10 @@ impl P {
     }
 }
 
-/// Merge physical lines into logical lines by paren balance and backslash
-/// continuation, so multi-line calls parse as one statement.
+/// Merge physical lines into logical lines. A logical line continues while parens
+/// are open, a triple-quoted string is open, or the line ends in a backslash, so
+/// multi-line calls and docstrings parse as one statement (and a stray `(` inside a
+/// docstring can never swallow the rest of the file).
 fn logical_lines(src: &str) -> Vec<(usize, String)> {
     let phys: Vec<&str> = src.lines().collect();
     let mut out = Vec::new();
@@ -465,15 +474,18 @@ fn logical_lines(src: &str) -> Vec<(usize, String)> {
     while i < phys.len() {
         let start = i + 1;
         let mut buf = phys[i].to_string();
-        while i + 1 < phys.len()
-            && (paren_balance(&buf) > 0 || buf.trim_end().ends_with('\\'))
-        {
+        loop {
+            let (paren, triple_open) = scan(&buf);
+            let cont = paren > 0 || triple_open || buf.trim_end().ends_with('\\');
+            if !cont || i + 1 >= phys.len() {
+                break;
+            }
             if buf.trim_end().ends_with('\\') {
                 let t = buf.trim_end();
                 buf.truncate(t.len() - 1);
             }
             i += 1;
-            buf.push(' ');
+            buf.push('\n');
             buf.push_str(phys[i]);
         }
         out.push((start, buf));
@@ -482,29 +494,63 @@ fn logical_lines(src: &str) -> Vec<(usize, String)> {
     out
 }
 
-/// Net open parens outside string literals.
-fn paren_balance(s: &str) -> i32 {
-    let mut bal = 0;
-    let mut quote: Option<char> = None;
-    let mut prev = '\0';
-    for c in s.chars() {
-        match quote {
-            Some(q) => {
-                if c == q && prev != '\\' {
-                    quote = None;
+/// Net open parens outside strings, and whether a triple-quoted string is still
+/// open at the end. Handles `'`/`"`, `'''`/`"""`, escapes, and `#` comments.
+fn scan(s: &str) -> (i32, bool) {
+    let ch: Vec<char> = s.chars().collect();
+    let n = ch.len();
+    let triple_at = |i: usize, q: char| ch.get(i) == Some(&q) && ch.get(i + 1) == Some(&q) && ch.get(i + 2) == Some(&q);
+    let mut i = 0;
+    let mut paren = 0i32;
+    let mut triple: Option<char> = None;
+    while i < n {
+        if let Some(q) = triple {
+            if triple_at(i, q) {
+                triple = None;
+                i += 3;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        match ch[i] {
+            '#' => {
+                while i < n && ch[i] != '\n' {
+                    i += 1;
                 }
             }
-            None => match c {
-                '"' | '\'' => quote = Some(c),
-                '#' => break,
-                '(' => bal += 1,
-                ')' => bal -= 1,
-                _ => {}
-            },
+            c @ ('"' | '\'') => {
+                if triple_at(i, c) {
+                    triple = Some(c);
+                    i += 3;
+                } else {
+                    // single-line string: skip to its close on this line
+                    i += 1;
+                    while i < n {
+                        if ch[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if ch[i] == c || ch[i] == '\n' {
+                            i += 1;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+            }
+            '(' => {
+                paren += 1;
+                i += 1;
+            }
+            ')' => {
+                paren -= 1;
+                i += 1;
+            }
+            _ => i += 1,
         }
-        prev = c;
     }
-    bal
+    (paren, triple.is_some())
 }
 
 fn parse(src: &str) -> Vec<Stmt> {
@@ -579,6 +625,20 @@ fn run_taint(stmts: &[Stmt]) -> Vec<Finding> {
     findings
 }
 
+/// A tainted variable used as the receiver of a dotted name (e.g. `name.lower`
+/// when `name` is tainted). `.` is a name char, so such calls lex as one Name;
+/// this recovers the receiver taint. Checks every dotted prefix.
+fn dotted_prefix(name: &str, tainted: &HashMap<String, Vec<usize>>) -> Option<Vec<usize>> {
+    for (i, c) in name.char_indices() {
+        if c == '.' {
+            if let Some(chain) = tainted.get(&name[..i]) {
+                return Some(chain.clone());
+            }
+        }
+    }
+    None
+}
+
 /// If this expression is tainted, return the provenance chain (source ... here).
 fn expr_taint(e: &Expr, tainted: &HashMap<String, Vec<usize>>, line: usize) -> Option<Vec<usize>> {
     match e {
@@ -586,7 +646,7 @@ fn expr_taint(e: &Expr, tainted: &HashMap<String, Vec<usize>>, line: usize) -> O
             if SOURCE_NAMES.contains(&n.as_str()) {
                 Some(vec![line])
             } else {
-                tainted.get(n).cloned()
+                tainted.get(n).cloned().or_else(|| dotted_prefix(n, tainted))
             }
         }
         Expr::Lit => None,
@@ -595,7 +655,9 @@ fn expr_taint(e: &Expr, tainted: &HashMap<String, Vec<usize>>, line: usize) -> O
             if is_source_call(name) {
                 Some(vec![line])
             } else {
-                args.iter().find_map(|a| expr_taint(a, tainted, line))
+                args.iter()
+                    .find_map(|a| expr_taint(a, tainted, line))
+                    .or_else(|| dotted_prefix(name, tainted))
             }
         }
         Expr::Method { recv, args, .. } => expr_taint(recv, tainted, line)
@@ -762,6 +824,31 @@ mod tests {
         let f = analyze(src);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].vuln, "command-injection");
+    }
+
+    #[test]
+    fn taint_through_method_on_a_bare_var() {
+        // name.lower() lexes as one Call; the receiver taint must still flow.
+        let src = "name = request.args.get(\"name\")\ncur.execute(name.lower())\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "sql-injection");
+    }
+
+    #[test]
+    fn docstring_with_unbalanced_paren_does_not_swallow_file() {
+        let src = "x = \"\"\"\n(\n\"\"\"\ny = input()\nos.system(y)\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "command-injection");
+    }
+
+    #[test]
+    fn fstring_with_conversion_flag() {
+        let src = "url = request.args.get(\"url\")\nrequests.get(f\"{url!r}\")\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "ssrf");
     }
 
     #[test]

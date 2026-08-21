@@ -45,6 +45,9 @@ overflowing the stack.
   function calls, no sanitizer awareness yet. So results are *candidate* paths a human
   confirms, the same honesty stance Oracle takes. Sanitizers and inter-procedural flow
   are the headline correctness work for v0.2.
+- `with open(p) as fp:` detects the tainted `open(p)` call, but the `as fp` binding is
+  not tracked, so taint does not flow into a later `fp.read()`. Do not trust it for
+  file-handle sinks yet.
 
 ## Roadmap
 
