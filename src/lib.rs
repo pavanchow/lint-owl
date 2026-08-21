@@ -182,7 +182,28 @@ enum Expr {
 enum Stmt {
     Assign { name: String, value: Expr, line: usize },
     Eval { value: Expr, line: usize },
+    Return { value: Expr, line: usize },
 }
+
+impl Stmt {
+    fn value_line(&self) -> (&Expr, usize) {
+        match self {
+            Stmt::Assign { value, line, .. } => (value, *line),
+            Stmt::Eval { value, line } => (value, *line),
+            Stmt::Return { value, line } => (value, *line),
+        }
+    }
+}
+
+/// A user-defined function: its parameter names and body statements.
+#[derive(Debug, Clone)]
+struct Func {
+    params: Vec<String>,
+    body: Vec<Stmt>,
+}
+
+/// How deep inter-procedural analysis follows call chains.
+const MAX_INTERPROC: usize = 6;
 
 // ---- Findings ----
 
@@ -212,7 +233,11 @@ pub fn analyze(src: &str) -> Vec<Finding> {
 
 /// Analyze with an explicit config (custom sources/sinks, or another language).
 pub fn analyze_cfg(src: &str, cfg: &Config) -> Vec<Finding> {
-    run_taint(&parse(src), cfg)
+    let (top, funcs) = parse_program(src);
+    let mut findings = Vec::new();
+    let visited = std::collections::HashSet::new();
+    taint_scope(&top, HashMap::new(), &funcs, 0, cfg, &mut findings, &visited);
+    findings
 }
 
 /// Scan source and return findings as JSON, each with its source-to-sink hops.
@@ -682,108 +707,261 @@ fn scan(s: &str) -> (i32, bool) {
     (paren, triple.is_some())
 }
 
-fn parse(src: &str) -> Vec<Stmt> {
+/// Build the statements for a single logical line (may be several, split on `;`).
+fn line_stmts(line: usize, buf: &str) -> Vec<Stmt> {
     let mut out = Vec::new();
-    for (line, buf) in logical_lines(src) {
-        let toks = lex_line(&buf);
-        // Split on ';' into separate statements.
-        for stmt_toks in toks.split(|t| *t == Tok::Semi) {
-            let mut toks = stmt_toks.to_vec();
+    let toks = lex_line(buf);
+    for stmt_toks in toks.split(|t| *t == Tok::Semi) {
+        let mut toks = stmt_toks.to_vec();
 
-            // `for VAR[, VAR...] in ITER:` binds the loop variables to the iterable,
-            // so taint flows into them (control-flow taint carrier).
-            if matches!(toks.first(), Some(Tok::Name(n)) if n == "for") {
-                if let Some(in_pos) = toks
+        // `for VAR[, VAR...] in ITER:` binds the loop variables to the iterable,
+        // so taint flows into them (control-flow taint carrier).
+        if matches!(toks.first(), Some(Tok::Name(n)) if n == "for") {
+            if let Some(in_pos) = toks
+                .iter()
+                .position(|t| matches!(t, Tok::Name(n) if n == "in"))
+            {
+                let vars: Vec<String> = toks[1..in_pos]
                     .iter()
-                    .position(|t| matches!(t, Tok::Name(n) if n == "in"))
-                {
-                    let vars: Vec<String> = toks[1..in_pos]
-                        .iter()
-                        .filter_map(|t| match t {
-                            Tok::Name(n) => Some(n.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    let mut p = P {
-                        toks: toks[in_pos + 1..].to_vec(),
-                        pos: 0,
-                        depth: 0,
-                    };
-                    let iter = p.expr();
-                    for v in vars {
-                        out.push(Stmt::Assign {
-                            name: v,
-                            value: iter.clone(),
-                            line,
-                        });
-                    }
-                    continue;
+                    .filter_map(|t| match t {
+                        Tok::Name(n) => Some(n.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let mut p = P { toks: toks[in_pos + 1..].to_vec(), pos: 0, depth: 0 };
+                let iter = p.expr();
+                for v in vars {
+                    out.push(Stmt::Assign { name: v, value: iter.clone(), line });
                 }
-            }
-
-            // Strip leading statement keywords so the real expression is analyzed.
-            while matches!(toks.first(), Some(Tok::Name(n)) if LEAD_KEYWORDS.contains(&n.as_str())) {
-                toks.remove(0);
-            }
-            if toks.is_empty() {
                 continue;
             }
-            if let (Some(Tok::Name(n)), Some(Tok::Eq)) = (toks.first(), toks.get(1)) {
-                let name = n.clone();
-                let mut p = P {
-                    toks: toks[2..].to_vec(),
-                    pos: 0,
-                    depth: 0,
-                };
-                out.push(Stmt::Assign {
-                    name,
-                    value: p.expr(),
-                    line,
-                });
-            } else {
-                let mut p = P {
-                    toks,
-                    pos: 0,
-                    depth: 0,
-                };
-                out.push(Stmt::Eval {
-                    value: p.expr(),
-                    line,
-                });
-            }
+        }
+
+        // `return EXPR` carries taint out of a function.
+        if matches!(toks.first(), Some(Tok::Name(n)) if n == "return") {
+            let mut p = P { toks: toks[1..].to_vec(), pos: 0, depth: 0 };
+            out.push(Stmt::Return { value: p.expr(), line });
+            continue;
+        }
+
+        while matches!(toks.first(), Some(Tok::Name(n)) if LEAD_KEYWORDS.contains(&n.as_str())) {
+            toks.remove(0);
+        }
+        if toks.is_empty() {
+            continue;
+        }
+        if let (Some(Tok::Name(n)), Some(Tok::Eq)) = (toks.first(), toks.get(1)) {
+            let name = n.clone();
+            let mut p = P { toks: toks[2..].to_vec(), pos: 0, depth: 0 };
+            out.push(Stmt::Assign { name, value: p.expr(), line });
+        } else {
+            let mut p = P { toks, pos: 0, depth: 0 };
+            out.push(Stmt::Eval { value: p.expr(), line });
         }
     }
     out
 }
 
+/// Logical lines with their indentation (leading spaces of the first physical line).
+fn logical_items(src: &str) -> Vec<(usize, usize, String)> {
+    logical_lines(src)
+        .into_iter()
+        .map(|(l, b)| {
+            let indent = b.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+            (l, indent, b)
+        })
+        .collect()
+}
+
+/// `def NAME(params):` header -> (name, param names). Strips types, defaults, `*`.
+fn parse_def(buf: &str) -> Option<(String, Vec<String>)> {
+    let t = buf.trim_start();
+    let rest = t.strip_prefix("def ").or_else(|| t.strip_prefix("async def "))?;
+    let paren = rest.find('(')?;
+    let name = rest[..paren].trim().to_string();
+    let close = rest[paren + 1..].find(')')?;
+    let params = rest[paren + 1..paren + 1 + close]
+        .split(',')
+        .filter_map(|p| {
+            let id = p.split(|c| c == ':' || c == '=').next().unwrap_or("").trim();
+            let id = id.trim_start_matches('*');
+            if id.is_empty() || id == "self" || id == "cls" {
+                None
+            } else {
+                Some(id.to_string())
+            }
+        })
+        .collect();
+    Some((name, params))
+}
+
+/// Split a source into top-level statements and a map of user-defined functions.
+fn parse_program(src: &str) -> (Vec<Stmt>, HashMap<String, Func>) {
+    let items = logical_items(src);
+    let mut funcs = HashMap::new();
+    let top = build_stmts(&items, &mut funcs);
+    (top, funcs)
+}
+
+fn build_stmts(items: &[(usize, usize, String)], funcs: &mut HashMap<String, Func>) -> Vec<Stmt> {
+    let mut stmts = Vec::new();
+    let mut i = 0;
+    while i < items.len() {
+        let (line, indent, buf) = &items[i];
+        if let Some((name, params)) = parse_def(buf) {
+            let d = *indent;
+            let mut j = i + 1;
+            while j < items.len() && items[j].1 > d {
+                j += 1;
+            }
+            let body = build_stmts(&items[i + 1..j], funcs);
+            funcs.insert(name, Func { params, body });
+            i = j;
+        } else {
+            stmts.extend(line_stmts(*line, buf));
+            i += 1;
+        }
+    }
+    stmts
+}
+
 // ---- Taint engine ----
 
-fn run_taint(stmts: &[Stmt], cfg: &Config) -> Vec<Finding> {
-    let mut tainted: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut findings = Vec::new();
+type Visited = std::collections::HashSet<String>;
 
+/// Analyze a block of statements with an initial taint map. Returns the taint
+/// chain of the block's `return` value, if any. Descends into calls to
+/// user-defined functions (inter-procedural), bounded by depth and a visited set.
+#[allow(clippy::too_many_arguments)]
+fn taint_scope(
+    stmts: &[Stmt],
+    mut tainted: HashMap<String, Vec<usize>>,
+    funcs: &HashMap<String, Func>,
+    depth: usize,
+    cfg: &Config,
+    findings: &mut Vec<Finding>,
+    visited: &Visited,
+) -> Option<Vec<usize>> {
+    let mut ret: Option<Vec<usize>> = None;
     for stmt in stmts {
-        let (value, line) = match stmt {
-            Stmt::Assign { value, line, .. } => (value, *line),
-            Stmt::Eval { value, line } => (value, *line),
-        };
-        find_sinks(value, line, &tainted, &mut findings, cfg);
-
-        if let Stmt::Assign { name, .. } = stmt {
-            match expr_taint(value, &tainted, line, cfg) {
-                Some(mut chain) => {
-                    if chain.last() != Some(&line) {
-                        chain.push(line);
+        let (value, line) = stmt.value_line();
+        // Sinks reached directly at this call site.
+        find_sinks(value, line, &tainted, findings, cfg);
+        // Inter-procedural: descend into user calls (records their internal sinks)
+        // and return the value's taint, including a called function's return taint.
+        let t = eval_expr(value, &tainted, line, cfg, funcs, depth, visited, findings);
+        match stmt {
+            Stmt::Assign { name, .. } => match &t {
+                Some(c) => {
+                    let mut c = c.clone();
+                    if c.last() != Some(&line) {
+                        c.push(line);
                     }
-                    tainted.insert(name.clone(), chain);
+                    tainted.insert(name.clone(), c);
                 }
                 None => {
                     tainted.remove(name);
                 }
+            },
+            Stmt::Return { .. } => {
+                if ret.is_none() {
+                    if let Some(c) = &t {
+                        let mut c = c.clone();
+                        if c.last() != Some(&line) {
+                            c.push(line);
+                        }
+                        ret = Some(c);
+                    }
+                }
             }
+            Stmt::Eval { .. } => {}
         }
     }
-    findings
+    ret
+}
+
+/// Evaluate an expression's taint, descending into user-defined function calls
+/// (which records any sink they reach via a tainted parameter, and yields the
+/// function's return taint).
+#[allow(clippy::too_many_arguments)]
+fn eval_expr(
+    e: &Expr,
+    tainted: &HashMap<String, Vec<usize>>,
+    line: usize,
+    cfg: &Config,
+    funcs: &HashMap<String, Func>,
+    depth: usize,
+    visited: &Visited,
+    findings: &mut Vec<Finding>,
+) -> Option<Vec<usize>> {
+    match e {
+        Expr::Name(n) => {
+            if cfg.is_source_name(n) {
+                Some(vec![line])
+            } else {
+                tainted.get(n).cloned().or_else(|| dotted_prefix(n, tainted))
+            }
+        }
+        Expr::Lit => None,
+        Expr::Concat(parts) => {
+            let mut r = None;
+            for p in parts {
+                let t = eval_expr(p, tainted, line, cfg, funcs, depth, visited, findings);
+                if r.is_none() {
+                    r = t;
+                }
+            }
+            r
+        }
+        Expr::Call { name, args } => {
+            // Evaluate args first (for their side effects and taints).
+            let arg_taints: Vec<Option<Vec<usize>>> = args
+                .iter()
+                .map(|a| eval_expr(a, tainted, line, cfg, funcs, depth, visited, findings))
+                .collect();
+            if cfg.is_sanitizer(name) {
+                return None;
+            }
+            if cfg.is_source_call(name) {
+                return Some(vec![line]);
+            }
+            if depth < MAX_INTERPROC && !visited.contains(name) {
+                if let Some(func) = funcs.get(name) {
+                    let mut seed = HashMap::new();
+                    for (p, t) in func.params.iter().zip(&arg_taints) {
+                        if let Some(c) = t {
+                            let mut c = c.clone();
+                            if c.last() != Some(&line) {
+                                c.push(line);
+                            }
+                            seed.insert(p.clone(), c);
+                        }
+                    }
+                    if seed.is_empty() {
+                        return None;
+                    }
+                    let mut v2 = visited.clone();
+                    v2.insert(name.clone());
+                    return taint_scope(&func.body, seed, funcs, depth + 1, cfg, findings, &v2);
+                }
+            }
+            arg_taints
+                .into_iter()
+                .flatten()
+                .next()
+                .or_else(|| dotted_prefix(name, tainted))
+        }
+        Expr::Method { recv, args, .. } => {
+            let mut r = eval_expr(recv, tainted, line, cfg, funcs, depth, visited, findings);
+            for a in args {
+                let t = eval_expr(a, tainted, line, cfg, funcs, depth, visited, findings);
+                if r.is_none() {
+                    r = t;
+                }
+            }
+            r
+        }
+    }
 }
 
 /// A tainted variable used as the receiver of a dotted name (e.g. `name.lower`
@@ -1019,6 +1197,37 @@ mod tests {
         // int() and shlex.quote() neutralize the taint before the sink.
         assert!(analyze("n = input()\nos.system(\"kill \" + int(n))\n").is_empty());
         assert!(analyze("h = input()\nos.system(shlex.quote(h))\n").is_empty());
+    }
+
+    #[test]
+    fn interproc_sink_inside_helper() {
+        // input() flows into run()'s param, which reaches os.system inside run.
+        let src = "def run(c):\n    os.system(c)\n\nrun(input())\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "command-injection");
+    }
+
+    #[test]
+    fn interproc_return_taint() {
+        // build() returns tainted data; the caller passes it to a sink.
+        let src = "def build(x):\n    return \"ping \" + x\n\nos.system(build(input()))\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "command-injection");
+    }
+
+    #[test]
+    fn interproc_two_levels() {
+        let src = "def inner(c):\n    os.system(c)\n\ndef outer(v):\n    inner(v)\n\nouter(input())\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+    }
+
+    #[test]
+    fn interproc_clean_helper_no_finding() {
+        let src = "def run(c):\n    os.system(\"ls\")\n\nrun(input())\n";
+        assert!(analyze(src).is_empty());
     }
 
     #[test]
