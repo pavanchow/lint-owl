@@ -371,6 +371,10 @@ fn is_name_char(c: char) -> bool {
 }
 
 fn lex_line(line: &str) -> Vec<Tok> {
+    lex_line_d(line, 0)
+}
+
+fn lex_line_d(line: &str, rec: usize) -> Vec<Tok> {
     let mut toks = Vec::new();
     let chars: Vec<char> = line.chars().collect();
     let mut i = 0;
@@ -409,7 +413,7 @@ fn lex_line(line: &str) -> Vec<Tok> {
                 }
             }
             '"' | '\'' => {
-                i = lex_string(&chars, i, &mut toks, false);
+                i = lex_string(&chars, i, &mut toks, false, rec);
             }
             c if c.is_ascii_digit() => {
                 while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
@@ -428,7 +432,7 @@ fn lex_line(line: &str) -> Vec<Tok> {
                     && name.chars().all(|c| matches!(c, 'f' | 'F' | 'r' | 'R' | 'b' | 'B'));
                 if is_str_prefix && matches!(chars.get(i), Some('"') | Some('\'')) {
                     let fstring = name.to_ascii_lowercase().contains('f');
-                    i = lex_string(&chars, i, &mut toks, fstring);
+                    i = lex_string(&chars, i, &mut toks, fstring, rec);
                 } else {
                     toks.push(Tok::Name(name));
                 }
@@ -444,7 +448,7 @@ fn lex_line(line: &str) -> Vec<Tok> {
 /// Lex a quoted string starting at `chars[i]` (the opening quote). If `fstring`,
 /// emit interpolations `{expr}` as nested tokens joined by `+` so taint flows.
 /// Returns the index just past the closing quote.
-fn lex_string(chars: &[char], mut i: usize, toks: &mut Vec<Tok>, fstring: bool) -> usize {
+fn lex_string(chars: &[char], mut i: usize, toks: &mut Vec<Tok>, fstring: bool, rec: usize) -> usize {
     let quote = chars[i];
     i += 1;
     if !fstring {
@@ -503,7 +507,11 @@ fn lex_string(chars: &[char], mut i: usize, toks: &mut Vec<Tok>, fstring: bool) 
                 .trim()
                 .trim_end_matches('=')
                 .to_string();
-            let inner_toks = lex_line(&inner);
+            let inner_toks = if rec < LEX_MAX_DEPTH {
+                lex_line_d(&inner, rec + 1)
+            } else {
+                Vec::new()
+            };
             toks.push(Tok::Plus);
             toks.push(Tok::LParen);
             toks.extend(inner_toks);
@@ -828,7 +836,9 @@ fn build_stmts(items: &[(usize, usize, String)], funcs: &mut HashMap<String, Fun
                 j += 1;
             }
             let body = build_stmts(&items[i + 1..j], funcs);
-            funcs.insert(name, Func { params, body });
+            // Keep the first (module-level) definition; a same-named nested/local
+            // function must not silently clobber it (that hid real findings).
+            funcs.entry(name).or_insert(Func { params, body });
             i = j;
         } else {
             stmts.extend(line_stmts(*line, buf));
@@ -1244,8 +1254,16 @@ pub fn php_config() -> Config {
 
 /// Tokenize JavaScript into statements (split on `;`, `{`, `}`). Dotted names,
 /// `+` concat, template literals with `${}`, and `//` `/* */` comments.
-#[allow(unused_assignments)]
+/// Bound on tokenizer self-recursion (nested template literals / f-strings), so
+/// hostile deeply-nested input truncates instead of overflowing the stack.
+const LEX_MAX_DEPTH: usize = 40;
+
 fn js_statements(src: &str) -> Vec<(usize, Vec<Tok>)> {
+    js_statements_d(src, 0)
+}
+
+#[allow(unused_assignments)]
+fn js_statements_d(src: &str, rec: usize) -> Vec<(usize, Vec<Tok>)> {
     let ch: Vec<char> = src.chars().collect();
     let n = ch.len();
     let is_name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '.');
@@ -1359,12 +1377,14 @@ fn js_statements(src: &str) -> Vec<(usize, Vec<Tok>)> {
                             }
                             j += 1;
                         }
-                        let inner: String = ch[start..j].iter().collect();
-                        for (_, mut t) in js_statements(&inner) {
-                            cur.push(Tok::Plus);
-                            cur.push(Tok::LParen);
-                            cur.append(&mut t);
-                            cur.push(Tok::RParen);
+                        if rec < LEX_MAX_DEPTH {
+                            let inner: String = ch[start..j].iter().collect();
+                            for (_, mut t) in js_statements_d(&inner, rec + 1) {
+                                cur.push(Tok::Plus);
+                                cur.push(Tok::LParen);
+                                cur.append(&mut t);
+                                cur.push(Tok::RParen);
+                            }
                         }
                         i = j + 1;
                         continue;
@@ -1803,6 +1823,40 @@ mod tests {
         let f = analyze_lang(src, Lang::Php, &php_config());
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].vuln, "sql-injection");
+    }
+
+    #[test]
+    fn deep_nested_js_template_does_not_overflow() {
+        let mut s = String::new();
+        for _ in 0..60_000 {
+            s.push_str("`${");
+        }
+        s.push('1');
+        for _ in 0..60_000 {
+            s.push_str("}`");
+        }
+        let _ = analyze_lang(&s, Lang::Js, &js_config());
+    }
+
+    #[test]
+    fn deep_nested_fstring_does_not_overflow() {
+        let mut s = String::from("x = ");
+        for _ in 0..60_000 {
+            s.push_str("f\"{");
+        }
+        s.push('1');
+        for _ in 0..60_000 {
+            s.push_str("}\"");
+        }
+        let _ = analyze(&s);
+    }
+
+    #[test]
+    fn nested_function_does_not_clobber_module_level() {
+        let src = "def helper(x):\n    os.system(x)\n\ndef outer():\n    def helper(x):\n        return \"safe \" + x\n    return helper(\"literal\")\n\nhelper(input())\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "command-injection");
     }
 
     #[test]
