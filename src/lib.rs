@@ -26,8 +26,8 @@ const SOURCE_NAMES: &[&str] = &[
     "request.data",
     "request.values",
 ];
-/// Calls that execute a command; tainted data reaching one is command injection.
-const SINK_CALLS: &[&str] = &[
+/// Command-execution sinks. Tainted data reaching one is command injection.
+const COMMAND_SINKS: &[&str] = &[
     "os.system",
     "os.popen",
     "subprocess.run",
@@ -37,6 +37,45 @@ const SINK_CALLS: &[&str] = &[
     "eval",
     "exec",
 ];
+const SSRF_SINKS: &[&str] = &[
+    "requests.get",
+    "requests.post",
+    "requests.put",
+    "requests.delete",
+    "requests.head",
+    "requests.request",
+    "urllib.request.urlopen",
+    "urlopen",
+    "httpx.get",
+    "httpx.post",
+];
+const DESERIALIZE_SINKS: &[&str] = &[
+    "pickle.loads",
+    "pickle.load",
+    "yaml.load",
+    "marshal.loads",
+    "dill.loads",
+];
+
+/// Which vulnerability class, if any, a called function is a sink for.
+fn sink_class(name: &str) -> Option<&'static str> {
+    if COMMAND_SINKS.contains(&name) {
+        return Some("command-injection");
+    }
+    if name == "execute" || name.ends_with(".execute") || name.ends_with(".executemany") {
+        return Some("sql-injection");
+    }
+    if SSRF_SINKS.contains(&name) || name.ends_with(".urlopen") {
+        return Some("ssrf");
+    }
+    if name == "open" {
+        return Some("path-traversal");
+    }
+    if DESERIALIZE_SINKS.contains(&name) {
+        return Some("insecure-deserialization");
+    }
+    None
+}
 
 // ---- AST ----
 
@@ -81,7 +120,7 @@ pub fn analyze(src: &str) -> Vec<Finding> {
 /// Render a finding as its source-to-sink chain against the original source.
 pub fn render(src: &str, f: &Finding) -> String {
     let lines: Vec<&str> = src.lines().collect();
-    let mut out = format!("{}: {}\n", f.vuln, "tainted data reaches a command sink");
+    let mut out = format!("{}: tainted data reaches a {} sink\n", f.vuln, f.vuln);
     for (i, &ln) in f.path.iter().enumerate() {
         let code = lines.get(ln - 1).map(|s| s.trim()).unwrap_or("");
         let tag = if i == 0 {
@@ -352,12 +391,12 @@ fn find_sinks(
     findings: &mut Vec<Finding>,
 ) {
     if let Expr::Call { name, args } = e {
-        if SINK_CALLS.contains(&name.as_str()) {
+        if let Some(class) = sink_class(name) {
             if let Some(chain) = args.iter().find_map(|a| expr_taint(a, tainted, line)) {
                 let mut path = chain;
                 path.push(line);
                 findings.push(Finding {
-                    vuln: "command-injection".into(),
+                    vuln: class.into(),
                     path,
                 });
             }
@@ -419,5 +458,37 @@ mod tests {
         let f = analyze(src);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].source_line(), 1);
+    }
+
+    #[test]
+    fn detects_sql_injection() {
+        let src = "name = request.args.get(\"name\")\nq = \"SELECT * FROM u WHERE n = \" + name\ncur.execute(q)\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "sql-injection");
+    }
+
+    #[test]
+    fn detects_ssrf() {
+        let src = "url = request.args.get(\"url\")\nrequests.get(url)\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "ssrf");
+    }
+
+    #[test]
+    fn detects_path_traversal() {
+        let src = "p = request.args.get(\"file\")\nopen(p)\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "path-traversal");
+    }
+
+    #[test]
+    fn detects_insecure_deserialization() {
+        let src = "blob = request.data\npickle.loads(blob)\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "insecure-deserialization");
     }
 }
