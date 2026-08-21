@@ -30,13 +30,21 @@ source-to-sink answer on real code.
 - **Finding**: a tainted argument reaching a sink call. The path is the line numbers
   from the source, through each assignment, to the sink.
 
+## Handled idioms
+
+Assignment, string concatenation, f-string interpolation (`f"... {x} ..."`), method
+chaining (`conn.cursor().execute(q)`), keyword-led statements (`with open(p) as f:`,
+`return run(x)`), semicolons, and multi-line calls (joined by paren balance). The
+parser is depth-bounded so hostile deeply-nested input truncates instead of
+overflowing the stack.
+
 ## Honest limits (v0.1, on purpose)
 
-- One language (a Python subset) and one vuln class (command injection).
-- Line-based, forward, single scope: no control flow (if/for), no functions across
-  calls, no sanitizer awareness yet. So results are *candidate* paths a human confirms,
-  the same honesty stance Oracle takes. Sanitizers and inter-procedural flow are the
-  headline correctness work for later.
+- One language (a Python subset), five vuln classes.
+- Forward, single scope: no control flow (if/for branch conditions), no flow across
+  function calls, no sanitizer awareness yet. So results are *candidate* paths a human
+  confirms, the same honesty stance Oracle takes. Sanitizers and inter-procedural flow
+  are the headline correctness work for v0.2.
 
 ## Roadmap
 

@@ -1,9 +1,11 @@
 //! Lint-Owl: a taint static analyzer whose result is the data-flow PATH from an
 //! untrusted source to a dangerous sink, not a flat list of warnings.
 //!
-//! v0.1 proves one property deeply: does taint reach a command-execution sink,
-//! over a Python subset. It is intentionally small and honest about its limits
-//! (see DESIGN.md): line-based, flow-forward, intra-scope, no control flow yet.
+//! v0.1 proves one property deeply: does taint reach a dangerous sink, over a
+//! Python subset. It handles assignment, string concat, f-string interpolation,
+//! method chaining, `with`/keyword-led statements, semicolons, and multi-line
+//! calls. Honest limits (see DESIGN.md): no control flow, no sanitizers, single
+//! scope, so results are candidate paths a human confirms.
 
 use serde::Serialize;
 use std::collections::HashMap;
@@ -11,9 +13,19 @@ use std::collections::HashMap;
 pub mod mcp;
 pub mod server;
 
-// ---- What counts as a source and a sink (command injection, v0.1) ----
+/// Parser recursion bound. Past this, deeply nested input is truncated instead of
+/// overflowing the native stack (an unauthenticated crash otherwise).
+const MAX_DEPTH: usize = 200;
 
-/// Calls that return attacker-controlled data, e.g. `input()`.
+/// Leading keywords we skip so the expression after them is still analyzed
+/// (e.g. `with open(p) as f:`, `return run(x)`).
+const LEAD_KEYWORDS: &[&str] = &[
+    "with", "if", "elif", "while", "for", "return", "assert", "await", "del", "yield",
+    "raise", "else", "try", "except", "finally", "async",
+];
+
+// ---- Sources and sinks ----
+
 const SOURCE_CALLS: &[&str] = &[
     "input",
     "request.args.get",
@@ -21,7 +33,6 @@ const SOURCE_CALLS: &[&str] = &[
     "request.values.get",
     "os.getenv",
 ];
-/// Bare names that are attacker-controlled, e.g. `sys.argv`.
 const SOURCE_NAMES: &[&str] = &[
     "sys.argv",
     "request.args",
@@ -29,7 +40,6 @@ const SOURCE_NAMES: &[&str] = &[
     "request.data",
     "request.values",
 ];
-/// Command-execution sinks. Tainted data reaching one is command injection.
 const COMMAND_SINKS: &[&str] = &[
     "os.system",
     "os.popen",
@@ -80,6 +90,10 @@ fn sink_class(name: &str) -> Option<&'static str> {
     None
 }
 
+fn is_source_call(name: &str) -> bool {
+    SOURCE_CALLS.contains(&name)
+}
+
 // ---- AST ----
 
 #[derive(Debug, Clone)]
@@ -87,6 +101,8 @@ enum Expr {
     Name(String),
     Lit,
     Call { name: String, args: Vec<Expr> },
+    /// A method call on a receiver: `recv.name(args)`.
+    Method { recv: Box<Expr>, name: String, args: Vec<Expr> },
     Concat(Vec<Expr>),
 }
 
@@ -114,14 +130,12 @@ impl Finding {
     }
 }
 
-/// Analyze a Python-subset source string and return command-injection paths.
+/// Analyze a Python-subset source string and return tainted source-to-sink paths.
 pub fn analyze(src: &str) -> Vec<Finding> {
-    let stmts = parse(src);
-    run_taint(&stmts)
+    run_taint(&parse(src))
 }
 
-/// Scan source and return findings as JSON, each with its source-to-sink hops
-/// (line, tag, code). Shared by the HTTP API and the MCP server.
+/// Scan source and return findings as JSON, each with its source-to-sink hops.
 pub fn scan_json(src: &str) -> serde_json::Value {
     let findings = analyze(src);
     let lines: Vec<&str> = src.lines().collect();
@@ -171,7 +185,7 @@ pub fn render(src: &str, f: &Finding) -> String {
     out
 }
 
-// ---- Lexer (per line) ----
+// ---- Lexer ----
 
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
@@ -182,95 +196,160 @@ enum Tok {
     Comma,
     Plus,
     Eq,
+    Semi,
+}
+
+fn is_name_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '.')
 }
 
 fn lex_line(line: &str) -> Vec<Tok> {
-    let is_name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.');
     let mut toks = Vec::new();
-    let mut chars = line.chars().peekable();
-    while let Some(&c) = chars.peek() {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
         match c {
-            '#' => break, // comment to end of line
-            c if c.is_whitespace() => {
-                chars.next();
-            }
+            '#' => break,
+            c if c.is_whitespace() => i += 1,
             '(' => {
-                chars.next();
                 toks.push(Tok::LParen);
+                i += 1;
             }
             ')' => {
-                chars.next();
                 toks.push(Tok::RParen);
+                i += 1;
             }
             ',' => {
-                chars.next();
                 toks.push(Tok::Comma);
+                i += 1;
             }
             '+' => {
-                chars.next();
                 toks.push(Tok::Plus);
+                i += 1;
+            }
+            ';' => {
+                toks.push(Tok::Semi);
+                i += 1;
             }
             '=' => {
-                chars.next();
-                // treat == as not-an-assignment; collapse to a literal-ish no-op
-                if chars.peek() == Some(&'=') {
-                    chars.next();
+                if chars.get(i + 1) == Some(&'=') {
                     toks.push(Tok::Lit);
+                    i += 2;
                 } else {
                     toks.push(Tok::Eq);
+                    i += 1;
                 }
             }
             '"' | '\'' => {
-                let q = c;
-                chars.next();
-                while let Some(ch) = chars.next() {
-                    if ch == '\\' {
-                        chars.next();
-                        continue;
-                    }
-                    if ch == q {
-                        break;
-                    }
-                }
-                toks.push(Tok::Lit);
+                i = lex_string(&chars, i, &mut toks, false);
             }
             c if c.is_ascii_digit() => {
-                while let Some(&ch) = chars.peek() {
-                    if ch.is_ascii_digit() || ch == '.' {
-                        chars.next();
-                    } else {
-                        break;
-                    }
+                while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                    i += 1;
                 }
                 toks.push(Tok::Lit);
             }
-            c if is_name(c) => {
-                let mut s = String::new();
-                while let Some(&ch) = chars.peek() {
-                    if is_name(ch) {
-                        s.push(ch);
-                        chars.next();
-                    } else {
-                        break;
-                    }
+            c if is_name_char(c) => {
+                let start = i;
+                while i < chars.len() && is_name_char(chars[i]) {
+                    i += 1;
                 }
-                toks.push(Tok::Name(s));
+                let name: String = chars[start..i].iter().collect();
+                // String prefix (f/r/b and combinations) directly followed by a quote.
+                let is_str_prefix = name.len() <= 2
+                    && name.chars().all(|c| matches!(c, 'f' | 'F' | 'r' | 'R' | 'b' | 'B'));
+                if is_str_prefix && matches!(chars.get(i), Some('"') | Some('\'')) {
+                    let fstring = name.to_ascii_lowercase().contains('f');
+                    i = lex_string(&chars, i, &mut toks, fstring);
+                } else {
+                    toks.push(Tok::Name(name));
+                }
             }
-            // Anything else (brackets, colons, operators we do not model) is
-            // skipped so the subset parser stays lenient on real-ish code.
-            _ => {
-                chars.next();
-            }
+            // Anything else (brackets, colons, operators we do not model) is skipped
+            // so the subset parser stays lenient on real code.
+            _ => i += 1,
         }
     }
     toks
 }
 
-// ---- Parser (per line) ----
+/// Lex a quoted string starting at `chars[i]` (the opening quote). If `fstring`,
+/// emit interpolations `{expr}` as nested tokens joined by `+` so taint flows.
+/// Returns the index just past the closing quote.
+fn lex_string(chars: &[char], mut i: usize, toks: &mut Vec<Tok>, fstring: bool) -> usize {
+    let quote = chars[i];
+    i += 1;
+    if !fstring {
+        while i < chars.len() {
+            if chars[i] == '\\' {
+                i += 2;
+                continue;
+            }
+            if chars[i] == quote {
+                i += 1;
+                break;
+            }
+            i += 1;
+        }
+        toks.push(Tok::Lit);
+        return i;
+    }
+    // f-string: literal segments are Lit, {..} interiors are lexed and grouped.
+    toks.push(Tok::Lit);
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            i += 2;
+            continue;
+        }
+        if chars[i] == quote {
+            i += 1;
+            break;
+        }
+        if chars[i] == '{' {
+            // `{{` is a literal brace.
+            if chars.get(i + 1) == Some(&'{') {
+                i += 2;
+                continue;
+            }
+            let start = i + 1;
+            let mut j = start;
+            let mut depth = 1;
+            while j < chars.len() && depth > 0 {
+                match chars[j] {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 {
+                    break;
+                }
+                j += 1;
+            }
+            let inner: String = chars[start..j].iter().collect();
+            // Drop any format spec after ':' (e.g. {x:>10}).
+            let inner = inner.split(':').next().unwrap_or("").to_string();
+            let inner_toks = lex_line(&inner);
+            toks.push(Tok::Plus);
+            toks.push(Tok::LParen);
+            toks.extend(inner_toks);
+            toks.push(Tok::RParen);
+            toks.push(Tok::Plus);
+            toks.push(Tok::Lit);
+            i = j + 1;
+            continue;
+        }
+        i += 1;
+    }
+    i
+}
+
+// ---- Parser ----
 
 struct P {
     toks: Vec<Tok>,
     pos: usize,
+    depth: usize,
 }
 
 impl P {
@@ -286,12 +365,17 @@ impl P {
     }
 
     fn expr(&mut self) -> Expr {
-        // concat: primary ('+' primary)*
-        let mut parts = vec![self.primary()];
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            self.depth -= 1;
+            return Expr::Lit;
+        }
+        let mut parts = vec![self.postfix()];
         while matches!(self.peek(), Some(Tok::Plus)) {
             self.next();
-            parts.push(self.primary());
+            parts.push(self.postfix());
         }
+        self.depth -= 1;
         if parts.len() == 1 {
             parts.pop().unwrap()
         } else {
@@ -299,65 +383,167 @@ impl P {
         }
     }
 
+    /// A primary followed by any number of `.method(args)` chains.
+    fn postfix(&mut self) -> Expr {
+        let mut e = self.primary();
+        loop {
+            match self.peek() {
+                Some(Tok::Name(n)) if n.starts_with('.') => {
+                    let name = n.trim_start_matches('.').to_string();
+                    self.next();
+                    let args = if matches!(self.peek(), Some(Tok::LParen)) {
+                        self.next();
+                        self.args()
+                    } else {
+                        Vec::new()
+                    };
+                    e = Expr::Method {
+                        recv: Box::new(e),
+                        name,
+                        args,
+                    };
+                }
+                _ => break,
+            }
+        }
+        e
+    }
+
+    fn args(&mut self) -> Vec<Expr> {
+        let mut args = Vec::new();
+        if !matches!(self.peek(), Some(Tok::RParen) | None) {
+            args.push(self.expr());
+            while matches!(self.peek(), Some(Tok::Comma)) {
+                self.next();
+                args.push(self.expr());
+            }
+        }
+        if matches!(self.peek(), Some(Tok::RParen)) {
+            self.next();
+        }
+        args
+    }
+
     fn primary(&mut self) -> Expr {
-        match self.next() {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            self.depth -= 1;
+            // Consume one token so we always make progress.
+            self.next();
+            return Expr::Lit;
+        }
+        let e = match self.next() {
             Some(Tok::Name(n)) => {
                 if matches!(self.peek(), Some(Tok::LParen)) {
-                    self.next(); // (
-                    let mut args = Vec::new();
-                    if !matches!(self.peek(), Some(Tok::RParen) | None) {
-                        args.push(self.expr());
-                        while matches!(self.peek(), Some(Tok::Comma)) {
-                            self.next();
-                            args.push(self.expr());
-                        }
-                    }
-                    if matches!(self.peek(), Some(Tok::RParen)) {
-                        self.next();
-                    }
+                    self.next();
+                    let args = self.args();
                     Expr::Call { name: n, args }
                 } else {
                     Expr::Name(n)
                 }
             }
             Some(Tok::LParen) => {
-                let e = self.expr();
+                let inner = self.expr();
                 if matches!(self.peek(), Some(Tok::RParen)) {
                     self.next();
                 }
-                e
+                inner
             }
             _ => Expr::Lit,
-        }
+        };
+        self.depth -= 1;
+        e
     }
+}
+
+/// Merge physical lines into logical lines by paren balance and backslash
+/// continuation, so multi-line calls parse as one statement.
+fn logical_lines(src: &str) -> Vec<(usize, String)> {
+    let phys: Vec<&str> = src.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < phys.len() {
+        let start = i + 1;
+        let mut buf = phys[i].to_string();
+        while i + 1 < phys.len()
+            && (paren_balance(&buf) > 0 || buf.trim_end().ends_with('\\'))
+        {
+            if buf.trim_end().ends_with('\\') {
+                let t = buf.trim_end();
+                buf.truncate(t.len() - 1);
+            }
+            i += 1;
+            buf.push(' ');
+            buf.push_str(phys[i]);
+        }
+        out.push((start, buf));
+        i += 1;
+    }
+    out
+}
+
+/// Net open parens outside string literals.
+fn paren_balance(s: &str) -> i32 {
+    let mut bal = 0;
+    let mut quote: Option<char> = None;
+    let mut prev = '\0';
+    for c in s.chars() {
+        match quote {
+            Some(q) => {
+                if c == q && prev != '\\' {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '#' => break,
+                '(' => bal += 1,
+                ')' => bal -= 1,
+                _ => {}
+            },
+        }
+        prev = c;
+    }
+    bal
 }
 
 fn parse(src: &str) -> Vec<Stmt> {
     let mut out = Vec::new();
-    for (idx, raw) in src.lines().enumerate() {
-        let line = idx + 1;
-        let toks = lex_line(raw);
-        if toks.is_empty() {
-            continue;
-        }
-        // Assignment: NAME '=' expr
-        if let (Some(Tok::Name(n)), Some(Tok::Eq)) = (toks.first(), toks.get(1)) {
-            let name = n.clone();
-            let mut p = P {
-                toks: toks[2..].to_vec(),
-                pos: 0,
-            };
-            out.push(Stmt::Assign {
-                name,
-                value: p.expr(),
-                line,
-            });
-        } else {
-            let mut p = P { toks, pos: 0 };
-            out.push(Stmt::Eval {
-                value: p.expr(),
-                line,
-            });
+    for (line, buf) in logical_lines(src) {
+        let toks = lex_line(&buf);
+        // Split on ';' into separate statements.
+        for stmt_toks in toks.split(|t| *t == Tok::Semi) {
+            let mut toks = stmt_toks.to_vec();
+            // Strip leading statement keywords so the real expression is analyzed.
+            while matches!(toks.first(), Some(Tok::Name(n)) if LEAD_KEYWORDS.contains(&n.as_str())) {
+                toks.remove(0);
+            }
+            if toks.is_empty() {
+                continue;
+            }
+            if let (Some(Tok::Name(n)), Some(Tok::Eq)) = (toks.first(), toks.get(1)) {
+                let name = n.clone();
+                let mut p = P {
+                    toks: toks[2..].to_vec(),
+                    pos: 0,
+                    depth: 0,
+                };
+                out.push(Stmt::Assign {
+                    name,
+                    value: p.expr(),
+                    line,
+                });
+            } else {
+                let mut p = P {
+                    toks,
+                    pos: 0,
+                    depth: 0,
+                };
+                out.push(Stmt::Eval {
+                    value: p.expr(),
+                    line,
+                });
+            }
         }
     }
     out
@@ -366,7 +552,6 @@ fn parse(src: &str) -> Vec<Stmt> {
 // ---- Taint engine ----
 
 fn run_taint(stmts: &[Stmt]) -> Vec<Finding> {
-    // var -> provenance chain (line numbers from source to where it was set).
     let mut tainted: HashMap<String, Vec<usize>> = HashMap::new();
     let mut findings = Vec::new();
 
@@ -375,10 +560,8 @@ fn run_taint(stmts: &[Stmt]) -> Vec<Finding> {
             Stmt::Assign { value, line, .. } => (value, *line),
             Stmt::Eval { value, line } => (value, *line),
         };
-        // 1. Any tainted data reaching a sink call in this statement is a finding.
         find_sinks(value, line, &tainted, &mut findings);
 
-        // 2. Update taint of the assigned variable.
         if let Stmt::Assign { name, .. } = stmt {
             match expr_taint(value, &tainted, line) {
                 Some(mut chain) => {
@@ -409,41 +592,62 @@ fn expr_taint(e: &Expr, tainted: &HashMap<String, Vec<usize>>, line: usize) -> O
         Expr::Lit => None,
         Expr::Concat(parts) => parts.iter().find_map(|p| expr_taint(p, tainted, line)),
         Expr::Call { name, args } => {
-            if SOURCE_CALLS.contains(&name.as_str()) {
+            if is_source_call(name) {
                 Some(vec![line])
             } else {
-                // A non-source call passes taint through from a tainted argument.
                 args.iter().find_map(|a| expr_taint(a, tainted, line))
             }
         }
+        Expr::Method { recv, args, .. } => expr_taint(recv, tainted, line)
+            .or_else(|| args.iter().find_map(|a| expr_taint(a, tainted, line))),
     }
 }
 
-/// Record a finding for every sink call in this expression that has a tainted arg.
+/// Record a finding for every sink call in this expression with a tainted arg.
 fn find_sinks(
     e: &Expr,
     line: usize,
     tainted: &HashMap<String, Vec<usize>>,
     findings: &mut Vec<Finding>,
 ) {
-    if let Expr::Call { name, args } = e {
-        if let Some(class) = sink_class(name) {
-            if let Some(chain) = args.iter().find_map(|a| expr_taint(a, tainted, line)) {
-                let mut path = chain;
-                path.push(line);
-                findings.push(Finding {
-                    vuln: class.into(),
-                    path,
-                });
+    match e {
+        Expr::Call { name, args } => {
+            if let Some(class) = sink_class(name) {
+                if let Some(chain) = args.iter().find_map(|a| expr_taint(a, tainted, line)) {
+                    let mut path = chain;
+                    path.push(line);
+                    findings.push(Finding {
+                        vuln: class.into(),
+                        path,
+                    });
+                }
+            }
+            for a in args {
+                find_sinks(a, line, tainted, findings);
             }
         }
-        for a in args {
-            find_sinks(a, line, tainted, findings);
+        Expr::Method { recv, name, args } => {
+            if let Some(class) = sink_class(name) {
+                if let Some(chain) = args.iter().find_map(|a| expr_taint(a, tainted, line)) {
+                    let mut path = chain;
+                    path.push(line);
+                    findings.push(Finding {
+                        vuln: class.into(),
+                        path,
+                    });
+                }
+            }
+            find_sinks(recv, line, tainted, findings);
+            for a in args {
+                find_sinks(a, line, tainted, findings);
+            }
         }
-    } else if let Expr::Concat(parts) = e {
-        for p in parts {
-            find_sinks(p, line, tainted, findings);
+        Expr::Concat(parts) => {
+            for p in parts {
+                find_sinks(p, line, tainted, findings);
+            }
         }
+        _ => {}
     }
 }
 
@@ -457,48 +661,41 @@ mod tests {
         let f = analyze(src);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].vuln, "command-injection");
-        assert_eq!(f[0].source_line(), 1);
-        assert_eq!(f[0].sink_line(), 3);
         assert_eq!(f[0].path, vec![1, 2, 3]);
     }
 
     #[test]
     fn no_finding_when_sink_arg_is_a_literal() {
-        let src = "os.system(\"ls -la\")\n";
-        assert!(analyze(src).is_empty());
+        assert!(analyze("os.system(\"ls -la\")\n").is_empty());
     }
 
     #[test]
     fn no_finding_when_source_never_reaches_sink() {
-        let src = "cmd = input()\nsafe = \"ls\"\nos.system(safe)\n";
-        assert!(analyze(src).is_empty());
+        assert!(analyze("cmd = input()\nsafe = \"ls\"\nos.system(safe)\n").is_empty());
     }
 
     #[test]
     fn reassigning_clean_clears_taint() {
-        let src = "x = input()\nx = \"ls\"\nos.system(x)\n";
-        assert!(analyze(src).is_empty());
+        assert!(analyze("x = input()\nx = \"ls\"\nos.system(x)\n").is_empty());
     }
 
     #[test]
     fn direct_source_into_sink() {
-        let src = "os.system(input())\n";
-        let f = analyze(src);
+        let f = analyze("os.system(input())\n");
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].path, vec![1, 1]);
     }
 
     #[test]
     fn bare_name_source_sys_argv() {
-        let src = "arg = sys.argv\nos.system(arg)\n";
-        let f = analyze(src);
+        let f = analyze("arg = sys.argv\nos.system(arg)\n");
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].source_line(), 1);
     }
 
     #[test]
     fn detects_sql_injection() {
-        let src = "name = request.args.get(\"name\")\nq = \"SELECT * FROM u WHERE n = \" + name\ncur.execute(q)\n";
+        let src = "name = request.args.get(\"name\")\nq = \"SELECT \" + name\ncur.execute(q)\n";
         let f = analyze(src);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].vuln, "sql-injection");
@@ -506,25 +703,79 @@ mod tests {
 
     #[test]
     fn detects_ssrf() {
-        let src = "url = request.args.get(\"url\")\nrequests.get(url)\n";
-        let f = analyze(src);
+        let f = analyze("url = request.args.get(\"url\")\nrequests.get(url)\n");
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].vuln, "ssrf");
     }
 
     #[test]
     fn detects_path_traversal() {
-        let src = "p = request.args.get(\"file\")\nopen(p)\n";
-        let f = analyze(src);
+        let f = analyze("p = request.args.get(\"file\")\nopen(p)\n");
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].vuln, "path-traversal");
     }
 
     #[test]
     fn detects_insecure_deserialization() {
-        let src = "blob = request.data\npickle.loads(blob)\n";
-        let f = analyze(src);
+        let f = analyze("blob = request.data\npickle.loads(blob)\n");
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].vuln, "insecure-deserialization");
+    }
+
+    // ---- Audit regressions ----
+
+    #[test]
+    fn method_chaining_execute() {
+        let src = "q = request.args.get(\"q\")\nconn.cursor().execute(q)\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "sql-injection");
+    }
+
+    #[test]
+    fn with_open_statement() {
+        let src = "p = request.args.get(\"file\")\nwith open(p) as fp:\n    data = fp.read()\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "path-traversal");
+    }
+
+    #[test]
+    fn fstring_interpolation() {
+        let src = "name = request.args.get(\"name\")\nq = f\"SELECT * FROM u WHERE n = {name}\"\ncur.execute(q)\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "sql-injection");
+    }
+
+    #[test]
+    fn semicolon_second_statement() {
+        let src = "cmd = input()\nx = 1; os.system(cmd)\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "command-injection");
+    }
+
+    #[test]
+    fn multiline_call() {
+        let src = "host = input()\nos.system(\n    host\n)\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "command-injection");
+    }
+
+    #[test]
+    fn deeply_nested_parens_does_not_overflow() {
+        let mut s = String::from("os.system(");
+        for _ in 0..100_000 {
+            s.push('(');
+        }
+        s.push('x');
+        for _ in 0..100_000 {
+            s.push(')');
+        }
+        s.push(')');
+        // Must return, not abort the process.
+        let _ = analyze(&s);
     }
 }
