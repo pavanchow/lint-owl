@@ -51,6 +51,19 @@
     .grid .k{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:8px}
     footer{padding:70px 0;border-top:1px solid var(--line);text-align:center;color:var(--muted)}
     footer a{color:var(--accent);text-decoration:none;font-family:var(--mono);font-size:14px}
+    .demo-panel{max-width:760px;margin:48px auto 0;background:#fff;border:1px solid var(--line);border-radius:14px;padding:24px}
+    .demo-top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+    .demo-presets{display:flex;gap:8px;flex-wrap:wrap}
+    .preset{font-family:var(--mono);font-size:12.5px;padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:#fff;color:var(--muted);cursor:pointer}
+    .preset.active{background:var(--ink);color:#fff;border-color:var(--ink)}
+    #demo-lang{font-family:var(--mono);font-size:12.5px;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:#fff;color:var(--ink)}
+    #demo-code{width:100%;min-height:150px;font-family:var(--mono);font-size:13.5px;line-height:1.55;padding:14px;border:1px solid var(--line);border-radius:10px;resize:vertical;background:var(--bg);color:var(--ink)}
+    .demo-actions{display:flex;justify-content:flex-end;margin-top:14px}
+    .demo-actions .btn{padding:10px 22px;font-size:14px;cursor:pointer;border:none}
+    #demo-output{margin-top:22px}
+    .safe-box{border:1px solid var(--line);border-radius:12px;padding:18px 20px;font-family:var(--mono);font-size:14px;color:var(--muted)}
+    .badge.high{background:#fff7ed;color:var(--high);border-color:#fed7aa}
+    .badge-safe{display:inline-block;font-size:12px;font-weight:700;padding:4px 10px;border-radius:8px;margin-bottom:14px;background:#f1f5f2;color:#166534;border:1px solid #bbf7d0}
   </style>
 </head>
 <body>
@@ -62,6 +75,27 @@
       <h1>Show me the path,<br>not the warning.</h1>
       <p>Lint-Owl is a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink. It proves that user input actually reaches the exploit, and shows the exact chain.</p>
       <div class="cta"><a class="btn" href="https://github.com/pavanchow/lint-owl">View on GitHub</a></div>
+    </section>
+
+    <section id="demo">
+      <h2>Run the taint engine yourself.</h2>
+      <p class="lead">This box runs a small taint tracer in your browser, built from the same sources, sanitizers, and sinks as the real analyzer. Edit the code and press Scan to see the path it finds.</p>
+      <div class="demo-panel">
+        <div class="demo-top">
+          <div class="demo-presets">
+            <button type="button" class="preset" data-preset="cmd">Command injection</button>
+            <button type="button" class="preset" data-preset="sql">SQL injection</button>
+            <button type="button" class="preset" data-preset="safe">Sanitized (safe)</button>
+          </div>
+          <select id="demo-lang">
+            <option value="python">Python</option>
+            <option value="js">JavaScript</option>
+          </select>
+        </div>
+        <textarea id="demo-code" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+        <div class="demo-actions"><button type="button" class="btn" id="demo-scan">Scan</button></div>
+        <div id="demo-output"></div>
+      </div>
     </section>
 
     <section>
@@ -119,5 +153,427 @@
       Lint-Owl is a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink: command injection, SQL injection, SSRF, path traversal, and insecure deserialization across Python, JavaScript, and PHP. It reports the source-to-sink taint path, not just a line number, and ships as a CLI, an HTTP API, an MCP server, and SARIF output for code review and bug bounty. Source at github.com/pavanchow/lint-owl. By Pavan Nallamothu.
     </div>
   </noscript>
+  <script>
+  (function(){
+    "use strict";
+
+    function ownedSinks(list){ return list; }
+
+    var PY_CONFIG = {
+      sourceCalls: ["input","request.args.get","request.form.get","request.values.get","os.getenv"],
+      sourceNames: ["sys.argv","request.args","request.form","request.data","request.values"],
+      sanitizers: ["int","float","bool","shlex.quote","pipes.quote"],
+      sinks: ownedSinks([
+        ["os.system",false,"command-injection"],["os.popen",false,"command-injection"],
+        ["subprocess.run",false,"command-injection"],["subprocess.call",false,"command-injection"],
+        ["subprocess.Popen",false,"command-injection"],["subprocess.check_output",false,"command-injection"],
+        ["eval",false,"command-injection"],["exec",false,"command-injection"],
+        ["execute",true,"sql-injection"],["executemany",true,"sql-injection"],
+        ["requests.get",false,"ssrf"],["requests.post",false,"ssrf"],["requests.put",false,"ssrf"],
+        ["requests.delete",false,"ssrf"],["requests.head",false,"ssrf"],["requests.request",false,"ssrf"],
+        ["urllib.request.urlopen",false,"ssrf"],["urlopen",false,"ssrf"],["httpx.get",false,"ssrf"],
+        ["httpx.post",false,"ssrf"],["urlopen",true,"ssrf"],
+        ["open",false,"path-traversal"],
+        ["pickle.loads",false,"insecure-deserialization"],["pickle.load",false,"insecure-deserialization"],
+        ["yaml.load",false,"insecure-deserialization"],["marshal.loads",false,"insecure-deserialization"],
+        ["dill.loads",false,"insecure-deserialization"]
+      ]),
+      leadKeywords: ["with","if","elif","while","for","return","assert","await","del","yield","raise","else","try","except","finally","async"]
+    };
+
+    var JS_CONFIG = {
+      sourceCalls: ["req.query.get"],
+      sourceNames: ["req.query","req.body","req.params","req.cookies","req.headers","process.argv","process.env","location.search","location.hash","document.URL"],
+      sanitizers: ["parseInt","parseFloat","Number","encodeURIComponent"],
+      sinks: ownedSinks([
+        ["child_process.exec",false,"command-injection"],["child_process.execSync",false,"command-injection"],
+        ["exec",false,"command-injection"],["execSync",false,"command-injection"],
+        ["eval",false,"command-injection"],["Function",false,"command-injection"],
+        ["query",true,"sql-injection"],
+        ["axios.get",false,"ssrf"],["axios.post",false,"ssrf"],["fetch",false,"ssrf"],
+        ["http.get",false,"ssrf"],["https.get",false,"ssrf"],["request",false,"ssrf"],["got",false,"ssrf"],
+        ["fs.readFile",false,"path-traversal"],["fs.readFileSync",false,"path-traversal"],
+        ["fs.createReadStream",false,"path-traversal"]
+      ]),
+      leadKeywords: ["function","if","else","while","for","do","switch","case","try","catch","throw","new","async","await","const","let","var","export","default","typeof","return"]
+    };
+
+    function isSourceCall(cfg,name){ return cfg.sourceCalls.indexOf(name) !== -1; }
+    function isSourceName(cfg,name){
+      for (var i=0;i<cfg.sourceNames.length;i++){
+        var s = cfg.sourceNames[i];
+        if (name === s || name.indexOf(s + ".") === 0) return true;
+      }
+      return false;
+    }
+    function isSanitizer(cfg,name){ return cfg.sanitizers.indexOf(name) !== -1; }
+    function sinkClass(cfg,name){
+      for (var i=0;i<cfg.sinks.length;i++){
+        var pat = cfg.sinks[i][0], suffix = cfg.sinks[i][1], cls = cfg.sinks[i][2];
+        var hit = suffix ? (name === pat || name.slice(-(pat.length+1)) === ("." + pat)) : (name === pat);
+        if (hit) return cls;
+      }
+      return null;
+    }
+    function severityOf(vuln){
+      return (vuln === "command-injection" || vuln === "sql-injection" || vuln === "insecure-deserialization") ? "critical" : "high";
+    }
+
+    // ---- Tokenizer ----
+    function isNameChar(c){ return /[A-Za-z0-9_.$]/.test(c); }
+
+    function tokenize(line, lang){
+      var toks = [];
+      var chars = Array.from(line);
+      var i = 0;
+      while (i < chars.length){
+        var c = chars[i];
+        if (lang === "python" && c === "#") break;
+        if (lang === "js" && c === "/" && chars[i+1] === "/") break;
+        if (/\s/.test(c)) { i++; continue; }
+        if (c === "(") { toks.push({t:"LParen"}); i++; continue; }
+        if (c === ")") { toks.push({t:"RParen"}); i++; continue; }
+        if (c === ",") { toks.push({t:"Comma"}); i++; continue; }
+        if (c === "+") { toks.push({t:"Plus"}); i++; continue; }
+        if (c === ";") { toks.push({t:"Semi"}); i++; continue; }
+        if (c === "=") {
+          if (chars[i+1] === "=") { toks.push({t:"Lit"}); i += 2; }
+          else { toks.push({t:"Eq"}); i++; }
+          continue;
+        }
+        if (c === '"' || c === "'") { i = lexString(chars, i, toks, false, lang, 0); continue; }
+        if (c === "`" && lang === "js") { i = lexTemplate(chars, i, toks, 0); continue; }
+        if (/[0-9]/.test(c)) {
+          while (i < chars.length && /[0-9.]/.test(chars[i])) i++;
+          toks.push({t:"Lit"});
+          continue;
+        }
+        if (isNameChar(c)) {
+          var start = i;
+          while (i < chars.length && isNameChar(chars[i])) i++;
+          var name = chars.slice(start, i).join("");
+          var isStrPrefix = lang === "python" && name.length <= 2 && /^[fFrRbB]+$/.test(name);
+          if (isStrPrefix && (chars[i] === '"' || chars[i] === "'")) {
+            var fstring = /f/i.test(name);
+            i = lexString(chars, i, toks, fstring, lang, 0);
+          } else {
+            toks.push({t:"Name", v:name});
+          }
+          continue;
+        }
+        i++;
+      }
+      return toks;
+    }
+
+    var LEX_MAX_DEPTH = 20;
+
+    function lexString(chars, i, toks, fstring, lang, rec){
+      var quote = chars[i];
+      i++;
+      if (!fstring){
+        while (i < chars.length){
+          if (chars[i] === "\\") { i += 2; continue; }
+          if (chars[i] === quote) { i++; break; }
+          i++;
+        }
+        toks.push({t:"Lit"});
+        return i;
+      }
+      toks.push({t:"Lit"});
+      while (i < chars.length){
+        if (chars[i] === "\\") { i += 2; continue; }
+        if (chars[i] === quote) { i++; break; }
+        if (chars[i] === "{"){
+          if (chars[i+1] === "{"){ i += 2; continue; }
+          var start = i + 1, j = start, depth = 1;
+          while (j < chars.length && depth > 0){
+            if (chars[j] === "{") depth++;
+            else if (chars[j] === "}") depth--;
+            if (depth === 0) break;
+            j++;
+          }
+          var inner = chars.slice(start, j).join("");
+          inner = inner.split(/[:!]/)[0].trim().replace(/=+$/, "");
+          var innerToks = rec < LEX_MAX_DEPTH ? tokenize(inner, lang) : [];
+          toks.push({t:"Plus"}); toks.push({t:"LParen"});
+          for (var k=0;k<innerToks.length;k++) toks.push(innerToks[k]);
+          toks.push({t:"RParen"}); toks.push({t:"Plus"}); toks.push({t:"Lit"});
+          i = j + 1;
+          continue;
+        }
+        i++;
+      }
+      return i;
+    }
+
+    function lexTemplate(chars, i, toks, rec){
+      i++; // backtick
+      toks.push({t:"Lit"});
+      while (i < chars.length && chars[i] !== "`"){
+        if (chars[i] === "\\") { i += 2; continue; }
+        if (chars[i] === "$" && chars[i+1] === "{"){
+          var start = i + 2, j = start, depth = 1;
+          while (j < chars.length && depth > 0){
+            if (chars[j] === "{") depth++;
+            else if (chars[j] === "}") depth--;
+            if (depth === 0) break;
+            j++;
+          }
+          var inner = chars.slice(start, j).join("");
+          var innerToks = rec < LEX_MAX_DEPTH ? tokenize(inner, "js") : [];
+          toks.push({t:"Plus"}); toks.push({t:"LParen"});
+          for (var k=0;k<innerToks.length;k++) toks.push(innerToks[k]);
+          toks.push({t:"RParen"}); toks.push({t:"Plus"}); toks.push({t:"Lit"});
+          i = j + 1;
+          continue;
+        }
+        i++;
+      }
+      i++;
+      return i;
+    }
+
+    // ---- Parser ----
+    function Parser(toks){ this.toks = toks; this.pos = 0; }
+    Parser.prototype.peek = function(){ return this.toks[this.pos]; };
+    Parser.prototype.next = function(){ return this.toks[this.pos++]; };
+    Parser.prototype.expr = function(){
+      var parts = [this.postfix()];
+      while (this.peek() && this.peek().t === "Plus"){ this.next(); parts.push(this.postfix()); }
+      return parts.length === 1 ? parts[0] : {k:"Concat", parts:parts};
+    };
+    Parser.prototype.postfix = function(){
+      var e = this.primary();
+      for (;;){
+        var t = this.peek();
+        if (t && t.t === "Name" && t.v.charAt(0) === "."){
+          var name = t.v.slice(1);
+          this.next();
+          var args = [];
+          if (this.peek() && this.peek().t === "LParen"){ this.next(); args = this.args(); }
+          e = {k:"Method", recv:e, name:name, args:args};
+        } else break;
+      }
+      return e;
+    };
+    Parser.prototype.args = function(){
+      var args = [];
+      if (!(this.peek() === undefined || this.peek().t === "RParen")){
+        args.push(this.expr());
+        while (this.peek() && this.peek().t === "Comma"){ this.next(); args.push(this.expr()); }
+      }
+      if (this.peek() && this.peek().t === "RParen") this.next();
+      return args;
+    };
+    Parser.prototype.primary = function(){
+      var t = this.next();
+      if (!t) return {k:"Lit"};
+      if (t.t === "Name"){
+        if (this.peek() && this.peek().t === "LParen"){ this.next(); var args = this.args(); return {k:"Call", name:t.v, args:args}; }
+        return {k:"Name", name:t.v};
+      }
+      if (t.t === "LParen"){ var inner = this.expr(); if (this.peek() && this.peek().t === "RParen") this.next(); return inner; }
+      return {k:"Lit"};
+    };
+
+    function lineStatements(lineNo, raw, lang, cfg){
+      var toks = tokenize(raw, lang);
+      var groups = [[]];
+      for (var i=0;i<toks.length;i++){
+        if (toks[i].t === "Semi") groups.push([]);
+        else groups[groups.length-1].push(toks[i]);
+      }
+      var stmts = [];
+      for (var g=0; g<groups.length; g++){
+        var gt = groups[g].slice();
+        while (gt.length && gt[0].t === "Name" && cfg.leadKeywords.indexOf(gt[0].v) !== -1) gt.shift();
+        if (gt.length === 0) continue;
+        if (gt[0].t === "Name" && gt[1] && gt[1].t === "Eq"){
+          var name = gt[0].v;
+          var p = new Parser(gt.slice(2));
+          stmts.push({kind:"Assign", name:name, value:p.expr(), line:lineNo});
+        } else {
+          var p2 = new Parser(gt);
+          stmts.push({kind:"Eval", value:p2.expr(), line:lineNo});
+        }
+      }
+      return stmts;
+    }
+
+    function dottedPrefix(name, tainted){
+      for (var i=0;i<name.length;i++){
+        if (name[i] === "."){
+          var prefix = name.slice(0, i);
+          if (tainted.has(prefix)) return tainted.get(prefix);
+        }
+      }
+      return null;
+    }
+
+    function taintOf(e, tainted, line, cfg){
+      if (e.k === "Name"){
+        if (isSourceName(cfg, e.name)) return [line];
+        return tainted.get(e.name) || dottedPrefix(e.name, tainted) || null;
+      }
+      if (e.k === "Lit") return null;
+      if (e.k === "Concat"){
+        for (var i=0;i<e.parts.length;i++){ var t = taintOf(e.parts[i], tainted, line, cfg); if (t) return t; }
+        return null;
+      }
+      if (e.k === "Call"){
+        if (isSanitizer(cfg, e.name)) return null;
+        if (isSourceCall(cfg, e.name)) return [line];
+        for (var j=0;j<e.args.length;j++){ var t2 = taintOf(e.args[j], tainted, line, cfg); if (t2) return t2; }
+        return dottedPrefix(e.name, tainted);
+      }
+      if (e.k === "Method"){
+        var tr = taintOf(e.recv, tainted, line, cfg);
+        if (tr) return tr;
+        for (var k=0;k<e.args.length;k++){ var t3 = taintOf(e.args[k], tainted, line, cfg); if (t3) return t3; }
+        return null;
+      }
+      return null;
+    }
+
+    function findSinks(e, line, tainted, findings, cfg){
+      if (e.k === "Call" || e.k === "Method"){
+        var cls = sinkClass(cfg, e.name);
+        if (cls){
+          var hit = null;
+          for (var i=0;i<e.args.length;i++){ var t = taintOf(e.args[i], tainted, line, cfg); if (t){ hit = t; break; } }
+          if (hit){
+            var path = hit.slice();
+            if (path[path.length-1] !== line) path.push(line);
+            findings.push({vuln:cls, path:path});
+          }
+        }
+        if (e.k === "Method") findSinks(e.recv, line, tainted, findings, cfg);
+        for (var j=0;j<e.args.length;j++) findSinks(e.args[j], line, tainted, findings, cfg);
+        return;
+      }
+      if (e.k === "Concat"){
+        for (var k=0;k<e.parts.length;k++) findSinks(e.parts[k], line, tainted, findings, cfg);
+      }
+    }
+
+    function analyze(src, lang){
+      var cfg = lang === "js" ? JS_CONFIG : PY_CONFIG;
+      var lines = src.split("\n");
+      var tainted = new Map();
+      var findings = [];
+      for (var idx=0; idx<lines.length; idx++){
+        var lineNo = idx + 1;
+        var stmts = lineStatements(lineNo, lines[idx], lang, cfg);
+        for (var s=0; s<stmts.length; s++){
+          var stmt = stmts[s];
+          findSinks(stmt.value, lineNo, tainted, findings, cfg);
+          var t = taintOf(stmt.value, tainted, lineNo, cfg);
+          if (stmt.kind === "Assign"){
+            if (t){
+              var c = t.slice();
+              if (c[c.length-1] !== lineNo) c.push(lineNo);
+              tainted.set(stmt.name, c);
+            } else {
+              tainted.delete(stmt.name);
+            }
+          }
+        }
+      }
+      return {lines:lines, findings:findings};
+    }
+
+    // ---- UI ----
+    function escapeHtml(s){
+      return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+        .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+    }
+
+    function renderFinding(f, lines){
+      var sev = severityOf(f.vuln);
+      var out = '<div class="finding" style="margin-top:20px">';
+      out += '<span class="badge' + (sev === "high" ? " high" : "") + '">' + escapeHtml(f.vuln) + "</span>";
+      for (var i=0;i<f.path.length;i++){
+        var ln = f.path[i];
+        var tag = i === 0 ? "source" : (i === f.path.length-1 ? "sink" : "flows");
+        var code = (lines[ln-1] || "").trim();
+        out += '<div class="hop"><span class="tag t-' + tag + '">' + tag + '</span>' +
+          '<span class="ln">line ' + ln + "</span><span>" + escapeHtml(code) + "</span></div>";
+      }
+      out += "</div>";
+      return out;
+    }
+
+    function renderResult(result){
+      var el = document.getElementById("demo-output");
+      if (result.findings.length === 0){
+        el.innerHTML = '<div class="safe-box"><span class="badge-safe">no finding</span><div>No tainted source reaches a sink on this path. Either nothing untrusted comes in, or a sanitizer clears it first.</div></div>';
+        return;
+      }
+      var html = "";
+      for (var i=0;i<result.findings.length;i++) html += renderFinding(result.findings[i], result.lines);
+      el.innerHTML = html;
+    }
+
+    var PRESETS = {
+      cmd: {
+        lang: "python",
+        code: 'host = input()\ncmd = "ping -c 1 " + host\nos.system(cmd)\n'
+      },
+      sql: {
+        lang: "python",
+        code: 'name = request.args.get("name")\nq = "SELECT * FROM users WHERE name = " + name\ncursor.execute(q)\n'
+      },
+      safe: {
+        lang: "python",
+        code: 'raw = input()\nn = int(raw)\nos.system("ping -c 1 " + str(n))\n'
+      }
+    };
+
+    function init(){
+      var codeEl = document.getElementById("demo-code");
+      var langEl = document.getElementById("demo-lang");
+      var scanBtn = document.getElementById("demo-scan");
+      var presetBtns = document.querySelectorAll(".preset");
+
+      function runScan(){
+        var lang = langEl.value === "js" ? "js" : "python";
+        var result = analyze(codeEl.value, lang);
+        renderResult(result);
+      }
+
+      function setActivePreset(key){
+        for (var i=0;i<presetBtns.length;i++){
+          presetBtns[i].classList.toggle("active", presetBtns[i].getAttribute("data-preset") === key);
+        }
+      }
+
+      for (var i=0;i<presetBtns.length;i++){
+        presetBtns[i].addEventListener("click", function(){
+          var key = this.getAttribute("data-preset");
+          var preset = PRESETS[key];
+          if (!preset) return;
+          codeEl.value = preset.code;
+          langEl.value = preset.lang;
+          setActivePreset(key);
+          runScan();
+        });
+      }
+
+      scanBtn.addEventListener("click", runScan);
+
+      codeEl.value = PRESETS.cmd.code;
+      langEl.value = PRESETS.cmd.lang;
+      setActivePreset("cmd");
+      runScan();
+    }
+
+    if (document.readyState === "loading"){
+      document.addEventListener("DOMContentLoaded", init);
+    } else {
+      init();
+    }
+  })();
+  </script>
 </body>
 </html>
