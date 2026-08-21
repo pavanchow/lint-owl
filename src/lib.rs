@@ -70,43 +70,99 @@ const DESERIALIZE_SINKS: &[&str] = &[
     "dill.loads",
 ];
 
-/// Which vulnerability class, if any, a called function is a sink for.
-fn sink_class(name: &str) -> Option<&'static str> {
-    if COMMAND_SINKS.contains(&name) {
-        return Some("command-injection");
-    }
-    if name == "execute" || name.ends_with(".execute") || name.ends_with(".executemany") {
-        return Some("sql-injection");
-    }
-    if SSRF_SINKS.contains(&name) || name.ends_with(".urlopen") {
-        return Some("ssrf");
-    }
-    if name == "open" {
-        return Some("path-traversal");
-    }
-    if DESERIALIZE_SINKS.contains(&name) {
-        return Some("insecure-deserialization");
-    }
-    None
-}
-
-fn is_source_call(name: &str) -> bool {
-    SOURCE_CALLS.contains(&name)
-}
 
 /// Calls that neutralize taint for our string sinks. Conservative on purpose:
 /// numeric casts cannot inject, and shell-quoting escapes command metacharacters.
 const SANITIZERS: &[&str] = &["int", "float", "bool", "shlex.quote", "pipes.quote"];
-
-fn is_sanitizer(name: &str) -> bool {
-    SANITIZERS.contains(&name)
-}
 
 /// Severity of a vulnerability class.
 pub fn severity(vuln: &str) -> &'static str {
     match vuln {
         "command-injection" | "sql-injection" | "insecure-deserialization" => "critical",
         _ => "high",
+    }
+}
+
+/// The source/sink/sanitizer model for a language, extensible by the user.
+#[derive(Clone)]
+pub struct Config {
+    pub source_calls: Vec<String>,
+    pub source_names: Vec<String>,
+    pub sanitizers: Vec<String>,
+    /// (pattern, is_suffix, class). Suffix rules match `name == pat` or `name` ending in `.pat`.
+    pub sinks: Vec<(String, bool, String)>,
+}
+
+impl Config {
+    pub fn is_source_call(&self, name: &str) -> bool {
+        self.source_calls.iter().any(|s| s == name)
+    }
+    pub fn is_source_name(&self, name: &str) -> bool {
+        self.source_names.iter().any(|s| s == name)
+    }
+    pub fn is_sanitizer(&self, name: &str) -> bool {
+        self.sanitizers.iter().any(|s| s == name)
+    }
+    pub fn sink_class(&self, name: &str) -> Option<&str> {
+        for (pat, suffix, class) in &self.sinks {
+            let hit = if *suffix {
+                name == pat || name.ends_with(&format!(".{pat}"))
+            } else {
+                name == pat
+            };
+            if hit {
+                return Some(class);
+            }
+        }
+        None
+    }
+
+    /// Merge user-supplied additions (from a JSON config) on top of this config.
+    pub fn merge_json(&mut self, v: &serde_json::Value) {
+        let strs = |x: Option<&serde_json::Value>| -> Vec<String> {
+            x.and_then(|a| a.as_array())
+                .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                .unwrap_or_default()
+        };
+        self.source_calls.extend(strs(v.get("source_calls")));
+        self.source_names.extend(strs(v.get("source_names")));
+        self.sanitizers.extend(strs(v.get("sanitizers")));
+        if let Some(obj) = v.get("sinks").and_then(|s| s.as_object()) {
+            for (class, names) in obj {
+                for n in names.as_array().into_iter().flatten() {
+                    if let Some(n) = n.as_str() {
+                        // A leading "." marks a suffix rule (e.g. ".query").
+                        let (pat, suffix) = n.strip_prefix('.').map_or((n, false), |p| (p, true));
+                        self.sinks.push((pat.to_string(), suffix, class.clone()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The default Python source/sink model.
+pub fn python_config() -> Config {
+    let owned = |a: &[&str]| a.iter().map(|s| s.to_string()).collect();
+    let mut sinks: Vec<(String, bool, String)> = Vec::new();
+    for s in COMMAND_SINKS {
+        sinks.push((s.to_string(), false, "command-injection".into()));
+    }
+    sinks.push(("execute".into(), true, "sql-injection".into()));
+    sinks.push(("executemany".into(), true, "sql-injection".into()));
+    for s in SSRF_SINKS {
+        sinks.push((s.to_string(), false, "ssrf".into()));
+    }
+    sinks.push(("urlopen".into(), true, "ssrf".into()));
+    sinks.push(("open".into(), false, "path-traversal".into()));
+    for s in DESERIALIZE_SINKS {
+        sinks.push((s.to_string(), false, "insecure-deserialization".into()));
+    }
+    Config {
+        source_calls: owned(SOURCE_CALLS),
+        source_names: owned(SOURCE_NAMES),
+        sanitizers: owned(SANITIZERS),
+        sinks,
     }
 }
 
@@ -149,14 +205,24 @@ impl Finding {
     }
 }
 
-/// Analyze a Python-subset source string and return tainted source-to-sink paths.
+/// Analyze a Python-subset source string with the default Python config.
 pub fn analyze(src: &str) -> Vec<Finding> {
-    run_taint(&parse(src))
+    analyze_cfg(src, &python_config())
+}
+
+/// Analyze with an explicit config (custom sources/sinks, or another language).
+pub fn analyze_cfg(src: &str, cfg: &Config) -> Vec<Finding> {
+    run_taint(&parse(src), cfg)
 }
 
 /// Scan source and return findings as JSON, each with its source-to-sink hops.
 pub fn scan_json(src: &str) -> serde_json::Value {
-    let findings = analyze(src);
+    scan_json_cfg(src, &python_config())
+}
+
+/// As `scan_json`, with an explicit config.
+pub fn scan_json_cfg(src: &str, cfg: &Config) -> serde_json::Value {
+    let findings = analyze_cfg(src, cfg);
     let lines: Vec<&str> = src.lines().collect();
     let out: Vec<serde_json::Value> = findings
         .iter()
@@ -184,6 +250,50 @@ pub fn scan_json(src: &str) -> serde_json::Value {
         })
         .collect();
     serde_json::json!({ "count": findings.len(), "findings": out })
+}
+
+/// Emit findings as SARIF 2.1.0 (for GitHub code scanning and IDEs). Each finding
+/// becomes a result with a codeFlow tracing the source-to-sink hops.
+pub fn sarif(files: &[(String, String, Vec<Finding>)]) -> serde_json::Value {
+    use serde_json::json;
+    let mut results = Vec::new();
+    for (file, src, findings) in files {
+        let lines: Vec<&str> = src.lines().collect();
+        let loc = |ln: usize| {
+            json!({
+                "physicalLocation": {
+                    "artifactLocation": { "uri": file },
+                    "region": {
+                        "startLine": ln,
+                        "snippet": { "text": lines.get(ln - 1).map(|s| s.trim()).unwrap_or("") }
+                    }
+                }
+            })
+        };
+        for f in findings {
+            let flow: Vec<_> = f.path.iter().map(|&ln| json!({ "location": loc(ln) })).collect();
+            let level = if f.severity() == "critical" { "error" } else { "warning" };
+            results.push(json!({
+                "ruleId": f.vuln,
+                "level": level,
+                "message": { "text": format!("Tainted data reaches a {} sink", f.vuln) },
+                "locations": [ loc(f.sink_line()) ],
+                "codeFlows": [ { "threadFlows": [ { "locations": flow } ] } ]
+            }));
+        }
+    }
+    json!({
+        "version": "2.1.0",
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "runs": [ {
+            "tool": { "driver": {
+                "name": "Lint-Owl",
+                "informationUri": "https://github.com/pavanchow/lint-owl",
+                "version": env!("CARGO_PKG_VERSION")
+            } },
+            "results": results
+        } ]
+    })
 }
 
 /// Render a finding as its source-to-sink chain against the original source.
@@ -579,6 +689,38 @@ fn parse(src: &str) -> Vec<Stmt> {
         // Split on ';' into separate statements.
         for stmt_toks in toks.split(|t| *t == Tok::Semi) {
             let mut toks = stmt_toks.to_vec();
+
+            // `for VAR[, VAR...] in ITER:` binds the loop variables to the iterable,
+            // so taint flows into them (control-flow taint carrier).
+            if matches!(toks.first(), Some(Tok::Name(n)) if n == "for") {
+                if let Some(in_pos) = toks
+                    .iter()
+                    .position(|t| matches!(t, Tok::Name(n) if n == "in"))
+                {
+                    let vars: Vec<String> = toks[1..in_pos]
+                        .iter()
+                        .filter_map(|t| match t {
+                            Tok::Name(n) => Some(n.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    let mut p = P {
+                        toks: toks[in_pos + 1..].to_vec(),
+                        pos: 0,
+                        depth: 0,
+                    };
+                    let iter = p.expr();
+                    for v in vars {
+                        out.push(Stmt::Assign {
+                            name: v,
+                            value: iter.clone(),
+                            line,
+                        });
+                    }
+                    continue;
+                }
+            }
+
             // Strip leading statement keywords so the real expression is analyzed.
             while matches!(toks.first(), Some(Tok::Name(n)) if LEAD_KEYWORDS.contains(&n.as_str())) {
                 toks.remove(0);
@@ -616,7 +758,7 @@ fn parse(src: &str) -> Vec<Stmt> {
 
 // ---- Taint engine ----
 
-fn run_taint(stmts: &[Stmt]) -> Vec<Finding> {
+fn run_taint(stmts: &[Stmt], cfg: &Config) -> Vec<Finding> {
     let mut tainted: HashMap<String, Vec<usize>> = HashMap::new();
     let mut findings = Vec::new();
 
@@ -625,10 +767,10 @@ fn run_taint(stmts: &[Stmt]) -> Vec<Finding> {
             Stmt::Assign { value, line, .. } => (value, *line),
             Stmt::Eval { value, line } => (value, *line),
         };
-        find_sinks(value, line, &tainted, &mut findings);
+        find_sinks(value, line, &tainted, &mut findings, cfg);
 
         if let Stmt::Assign { name, .. } = stmt {
-            match expr_taint(value, &tainted, line) {
+            match expr_taint(value, &tainted, line, cfg) {
                 Some(mut chain) => {
                     if chain.last() != Some(&line) {
                         chain.push(line);
@@ -659,30 +801,35 @@ fn dotted_prefix(name: &str, tainted: &HashMap<String, Vec<usize>>) -> Option<Ve
 }
 
 /// If this expression is tainted, return the provenance chain (source ... here).
-fn expr_taint(e: &Expr, tainted: &HashMap<String, Vec<usize>>, line: usize) -> Option<Vec<usize>> {
+fn expr_taint(
+    e: &Expr,
+    tainted: &HashMap<String, Vec<usize>>,
+    line: usize,
+    cfg: &Config,
+) -> Option<Vec<usize>> {
     match e {
         Expr::Name(n) => {
-            if SOURCE_NAMES.contains(&n.as_str()) {
+            if cfg.is_source_name(n) {
                 Some(vec![line])
             } else {
                 tainted.get(n).cloned().or_else(|| dotted_prefix(n, tainted))
             }
         }
         Expr::Lit => None,
-        Expr::Concat(parts) => parts.iter().find_map(|p| expr_taint(p, tainted, line)),
+        Expr::Concat(parts) => parts.iter().find_map(|p| expr_taint(p, tainted, line, cfg)),
         Expr::Call { name, args } => {
-            if is_sanitizer(name) {
-                None // a sanitizer clears taint, even on a tainted argument
-            } else if is_source_call(name) {
+            if cfg.is_sanitizer(name) {
+                None
+            } else if cfg.is_source_call(name) {
                 Some(vec![line])
             } else {
                 args.iter()
-                    .find_map(|a| expr_taint(a, tainted, line))
+                    .find_map(|a| expr_taint(a, tainted, line, cfg))
                     .or_else(|| dotted_prefix(name, tainted))
             }
         }
-        Expr::Method { recv, args, .. } => expr_taint(recv, tainted, line)
-            .or_else(|| args.iter().find_map(|a| expr_taint(a, tainted, line))),
+        Expr::Method { recv, args, .. } => expr_taint(recv, tainted, line, cfg)
+            .or_else(|| args.iter().find_map(|a| expr_taint(a, tainted, line, cfg))),
     }
 }
 
@@ -692,42 +839,37 @@ fn find_sinks(
     line: usize,
     tainted: &HashMap<String, Vec<usize>>,
     findings: &mut Vec<Finding>,
+    cfg: &Config,
 ) {
+    let mut report = |name: &str, args: &[Expr], findings: &mut Vec<Finding>| {
+        if let Some(class) = cfg.sink_class(name) {
+            if let Some(chain) = args.iter().find_map(|a| expr_taint(a, tainted, line, cfg)) {
+                let mut path = chain;
+                path.push(line);
+                findings.push(Finding {
+                    vuln: class.into(),
+                    path,
+                });
+            }
+        }
+    };
     match e {
         Expr::Call { name, args } => {
-            if let Some(class) = sink_class(name) {
-                if let Some(chain) = args.iter().find_map(|a| expr_taint(a, tainted, line)) {
-                    let mut path = chain;
-                    path.push(line);
-                    findings.push(Finding {
-                        vuln: class.into(),
-                        path,
-                    });
-                }
-            }
+            report(name, args, findings);
             for a in args {
-                find_sinks(a, line, tainted, findings);
+                find_sinks(a, line, tainted, findings, cfg);
             }
         }
         Expr::Method { recv, name, args } => {
-            if let Some(class) = sink_class(name) {
-                if let Some(chain) = args.iter().find_map(|a| expr_taint(a, tainted, line)) {
-                    let mut path = chain;
-                    path.push(line);
-                    findings.push(Finding {
-                        vuln: class.into(),
-                        path,
-                    });
-                }
-            }
-            find_sinks(recv, line, tainted, findings);
+            report(name, args, findings);
+            find_sinks(recv, line, tainted, findings, cfg);
             for a in args {
-                find_sinks(a, line, tainted, findings);
+                find_sinks(a, line, tainted, findings, cfg);
             }
         }
         Expr::Concat(parts) => {
             for p in parts {
-                find_sinks(p, line, tainted, findings);
+                find_sinks(p, line, tainted, findings, cfg);
             }
         }
         _ => {}
@@ -877,6 +1019,23 @@ mod tests {
         // int() and shlex.quote() neutralize the taint before the sink.
         assert!(analyze("n = input()\nos.system(\"kill \" + int(n))\n").is_empty());
         assert!(analyze("h = input()\nos.system(shlex.quote(h))\n").is_empty());
+    }
+
+    #[test]
+    fn for_loop_binding_taints_var() {
+        let src = "for host in sys.argv:\n    os.system(host)\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "command-injection");
+    }
+
+    #[test]
+    fn user_config_adds_sinks() {
+        let mut cfg = python_config();
+        cfg.merge_json(&serde_json::json!({ "sinks": { "template-injection": ["render_template_string"] } }));
+        let f = analyze_cfg("t = input()\nrender_template_string(t)\n", &cfg);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "template-injection");
     }
 
     #[test]
