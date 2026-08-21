@@ -1,12 +1,118 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>lint-owl</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lint-Owl: a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink</title>
+  <meta name="description" content="Lint-Owl is a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink. Command injection, SQL injection, SSRF, path traversal, insecure deserialization. Agent-native taint analysis for bug bounty and code review. By Pavan Nallamothu.">
+  <meta name="author" content="Pavan Nallamothu">
+  <meta name="keywords" content="static analyzer, taint analysis, data flow analysis, source to sink, command injection, SQL injection, SSRF, path traversal, bug bounty, code review, Pavan Nallamothu">
+  <link rel="canonical" href="https://pavanchow.github.io/lint-owl/">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Lint-Owl: a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink">
+  <meta property="og:description" content="The output is the tainted path itself: source line, each hop, sink line. Agent-native. By Pavan Nallamothu.">
+  <meta property="og:url" content="https://pavanchow.github.io/lint-owl/">
+  <meta name="twitter:card" content="summary">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"SoftwareApplication","name":"Lint-Owl","applicationCategory":"SecurityApplication","softwareVersion":"0.1.0","author":{"@type":"Person","name":"Pavan Nallamothu"},"description":"A static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink.","url":"https://pavanchow.github.io/lint-owl/","codeRepository":"https://github.com/pavanchow/lint-owl"}
+  </script>
+  <style>
+    :root{--bg:#fbfbf9;--ink:#16181a;--muted:#5c6360;--line:#e6e6e2;--accent:#7c5cff;
+      --crit:#b91c1c;--high:#c2410c;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:var(--bg);color:var(--ink);
+      font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+      -webkit-font-smoothing:antialiased}
+    .wrap{max-width:1000px;margin:0 auto;padding:0 28px}
+    nav{display:flex;justify-content:space-between;align-items:center;height:68px;font-size:15px}
+    nav .v{color:var(--muted);font-family:var(--mono);font-size:12.5px}
+    section{padding:120px 0;border-top:1px solid var(--line)}
+    section:first-of-type{border-top:none}
+    .eyebrow{font-family:var(--mono);font-size:12.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);text-align:center}
+    h1{font-size:clamp(40px,7vw,76px);line-height:1.04;letter-spacing:-0.035em;font-weight:650;text-align:center;margin:26px 0 0}
+    .hero p{max-width:660px;margin:32px auto 0;text-align:center;font-size:clamp(18px,2.3vw,22px);color:var(--muted)}
+    .cta{display:flex;justify-content:center;margin-top:44px}
+    .btn{display:inline-block;padding:14px 26px;border-radius:999px;background:var(--accent);color:#fff;font-weight:600;text-decoration:none}
+    h2{font-size:clamp(28px,4.4vw,46px);line-height:1.12;letter-spacing:-0.028em;font-weight:640;text-align:center;max-width:760px;margin:0 auto}
+    .lead{max-width:620px;margin:28px auto 0;text-align:center;color:var(--muted);font-size:18px}
+    .finding{max-width:680px;margin:56px auto 0;background:#fff;border:1px solid var(--line);border-radius:14px;padding:22px 24px;font-family:var(--mono);font-size:14px}
+    .badge{display:inline-block;font-size:12px;font-weight:700;padding:4px 10px;border-radius:8px;margin-bottom:14px;background:#fef2f2;color:var(--crit);border:1px solid #fecaca}
+    .hop{display:flex;gap:12px;align-items:baseline;padding:4px 0}
+    .tag{width:56px;flex:none;font-weight:700;text-transform:uppercase;font-size:10.5px;letter-spacing:.08em}
+    .t-source{color:var(--high)}.t-flows{color:var(--muted)}.t-sink{color:var(--crit)}
+    .ln{color:var(--muted);width:56px;flex:none}
+    .rows{max-width:760px;margin:44px auto 0}
+    .rows .r{display:grid;grid-template-columns:minmax(150px,1fr) 2fr;gap:14px 36px;padding:26px 0;border-top:1px solid var(--line)}
+    .rows .r b{font-size:18px}.rows .r p{color:var(--muted)}
+    .chips{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;max-width:720px;margin:44px auto 0}
+    .chip{font-family:var(--mono);font-size:13px;padding:8px 14px;border:1px solid var(--line);border-radius:999px;background:#fff}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:14px;overflow:hidden;max-width:760px;margin:48px auto 0}
+    .grid .cell{background:#fff;padding:26px 24px}
+    .grid .k{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:8px}
+    footer{padding:70px 0;border-top:1px solid var(--line);text-align:center;color:var(--muted)}
+    footer a{color:var(--accent);text-decoration:none;font-family:var(--mono);font-size:14px}
+  </style>
 </head>
 <body>
-<h1>lint-owl</h1>
-<p>Site coming soon.</p>
-<p><a href="https://github.com/pavanchow/lint-owl">View repository</a></p>
+  <div class="wrap">
+    <nav><b>Lint-Owl</b><span class="v">v0.1.0</span></nav>
+
+    <section class="hero">
+      <p class="eyebrow">Open source, agent-native</p>
+      <h1>Show me the path,<br>not the warning.</h1>
+      <p>Lint-Owl is a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink. It proves that user input actually reaches the exploit, and shows the exact chain.</p>
+      <div class="cta"><a class="btn" href="https://github.com/pavanchow/lint-owl">View on GitHub</a></div>
+    </section>
+
+    <section>
+      <h2>A finding is a path, not a line number.</h2>
+      <p class="lead">Most tools point at a line and say "this looks risky." Lint-Owl follows the taint from where it enters to where it detonates.</p>
+      <div class="finding">
+        <span class="badge">command-injection</span>
+        <div class="hop"><span class="tag t-source">source</span><span class="ln">line 4</span><span>host = request.args.get("host")</span></div>
+        <div class="hop"><span class="tag t-flows">flows</span><span class="ln">line 5</span><span>cmd = "ping -c 1 " + host</span></div>
+        <div class="hop"><span class="tag t-sink">sink</span><span class="ln">line 6</span><span>os.system(cmd)</span></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>How it differs</h2>
+      <div class="rows">
+        <div class="r"><b>Linters</b><p>Flag local smells. No data flow across statements, no source-to-sink reasoning.</p></div>
+        <div class="r"><b>Semgrep</b><p>Matches syntactic patterns. A pattern does not prove the input actually reaches the sink through assignments.</p></div>
+        <div class="r"><b>CodeQL</b><p>A real dataflow engine, but heavy: build a database, learn a query language. Overkill for one file.</p></div>
+        <div class="r"><b>Lint-Owl</b><p>One small binary whose output is the tainted path itself, and an MCP tool an AI asks "does user input reach this exec".</p></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Five vulnerability classes.</h2>
+      <p class="lead">Each is a source-and-sink set, so more classes are just data.</p>
+      <div class="chips">
+        <span class="chip">command injection</span>
+        <span class="chip">SQL injection</span>
+        <span class="chip">SSRF</span>
+        <span class="chip">path traversal</span>
+        <span class="chip">insecure deserialization</span>
+      </div>
+    </section>
+
+    <section>
+      <h2>Built in Rust, honest about its limits.</h2>
+      <div class="grid">
+        <div class="cell"><div class="k">Working</div><p>Taint engine with provenance, source-to-sink paths</p></div>
+        <div class="cell"><div class="k">Working</div><p>CLI, HTTP API + console, MCP server</p></div>
+        <div class="cell"><div class="k">Working</div><p>Python-subset front end, 5 vuln classes</p></div>
+        <div class="cell"><div class="k">Next (v0.2)</div><p>Sanitizer awareness and control flow</p></div>
+      </div>
+      <p class="lead" style="margin-top:36px">Results are candidate paths a human confirms. No sanitizer or control-flow awareness yet, and that honesty is written into the README.</p>
+    </section>
+
+    <footer>
+      <p>Static analysis that shows the path from input to exploit.</p>
+      <p style="margin-top:14px"><a href="https://github.com/pavanchow/lint-owl">github.com/pavanchow/lint-owl</a></p>
+      <p style="margin-top:14px">By Pavan Nallamothu.</p>
+    </footer>
+  </div>
 </body>
 </html>
