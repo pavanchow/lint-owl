@@ -94,6 +94,22 @@ fn is_source_call(name: &str) -> bool {
     SOURCE_CALLS.contains(&name)
 }
 
+/// Calls that neutralize taint for our string sinks. Conservative on purpose:
+/// numeric casts cannot inject, and shell-quoting escapes command metacharacters.
+const SANITIZERS: &[&str] = &["int", "float", "bool", "shlex.quote", "pipes.quote"];
+
+fn is_sanitizer(name: &str) -> bool {
+    SANITIZERS.contains(&name)
+}
+
+/// Severity of a vulnerability class.
+pub fn severity(vuln: &str) -> &'static str {
+    match vuln {
+        "command-injection" | "sql-injection" | "insecure-deserialization" => "critical",
+        _ => "high",
+    }
+}
+
 // ---- AST ----
 
 #[derive(Debug, Clone)]
@@ -128,6 +144,9 @@ impl Finding {
     pub fn sink_line(&self) -> usize {
         *self.path.last().unwrap_or(&0)
     }
+    pub fn severity(&self) -> &'static str {
+        severity(&self.vuln)
+    }
 }
 
 /// Analyze a Python-subset source string and return tainted source-to-sink paths.
@@ -161,7 +180,7 @@ pub fn scan_json(src: &str) -> serde_json::Value {
                     })
                 })
                 .collect();
-            serde_json::json!({ "vuln": f.vuln, "path": hops })
+            serde_json::json!({ "vuln": f.vuln, "severity": f.severity(), "path": hops })
         })
         .collect();
     serde_json::json!({ "count": findings.len(), "findings": out })
@@ -170,7 +189,7 @@ pub fn scan_json(src: &str) -> serde_json::Value {
 /// Render a finding as its source-to-sink chain against the original source.
 pub fn render(src: &str, f: &Finding) -> String {
     let lines: Vec<&str> = src.lines().collect();
-    let mut out = format!("{}: tainted data reaches a {} sink\n", f.vuln, f.vuln);
+    let mut out = format!("{} [{}]: tainted data reaches a {} sink\n", f.vuln, f.severity(), f.vuln);
     for (i, &ln) in f.path.iter().enumerate() {
         let code = lines.get(ln - 1).map(|s| s.trim()).unwrap_or("");
         let tag = if i == 0 {
@@ -652,7 +671,9 @@ fn expr_taint(e: &Expr, tainted: &HashMap<String, Vec<usize>>, line: usize) -> O
         Expr::Lit => None,
         Expr::Concat(parts) => parts.iter().find_map(|p| expr_taint(p, tainted, line)),
         Expr::Call { name, args } => {
-            if is_source_call(name) {
+            if is_sanitizer(name) {
+                None // a sanitizer clears taint, even on a tainted argument
+            } else if is_source_call(name) {
                 Some(vec![line])
             } else {
                 args.iter()
@@ -849,6 +870,21 @@ mod tests {
         let f = analyze(src);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].vuln, "ssrf");
+    }
+
+    #[test]
+    fn sanitizer_clears_taint() {
+        // int() and shlex.quote() neutralize the taint before the sink.
+        assert!(analyze("n = input()\nos.system(\"kill \" + int(n))\n").is_empty());
+        assert!(analyze("h = input()\nos.system(shlex.quote(h))\n").is_empty());
+    }
+
+    #[test]
+    fn severity_is_set() {
+        let f = analyze("h = input()\nos.system(h)\n");
+        assert_eq!(f[0].severity(), "critical");
+        let f2 = analyze("u = request.args.get(\"u\")\nrequests.get(u)\n");
+        assert_eq!(f2[0].severity(), "high");
     }
 
     #[test]

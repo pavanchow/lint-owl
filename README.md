@@ -8,8 +8,13 @@ source to sink. Aimed at real bug-bounty and code-review work. By Pavan Nallamot
 ## Try it
 
 ```
-cargo run -- scan examples/vuln.py
+cargo run -- scan examples/vuln.py        # one file
+cargo run -- scan path/to/your/repo       # a whole tree of .py files
 ```
+
+Exits non-zero when it finds anything, so it drops into CI or a pre-commit hook
+(`--exit-zero` to override). Known sanitizers (`int`, `shlex.quote`, ...) clear taint,
+so quoted or cast input is not flagged.
 
 ```
 1 tainted path(s) to a command sink in examples/vuln.py:
@@ -56,7 +61,8 @@ line chain. See [DESIGN.md](DESIGN.md).
 
 ## Status
 
-v0.1: command-injection detection over a Python subset, with source-to-sink paths and a
-CLI. Results are candidate paths (no sanitizer or control-flow awareness yet). Next:
-more vuln classes, then an HTTP API and an MCP server, then sanitizer and inter-procedural
-flow in v0.2.
+v0.2: five vuln classes over a Python subset, source-to-sink paths, directory/repo
+scanning, CI exit codes, basic sanitizer awareness, severity, CLI + HTTP API + console +
+MCP. Two independent audits fixed. Results are candidate paths (no control flow or
+inter-procedural flow yet). Next: control-flow and cross-function taint, more languages,
+and SARIF output.

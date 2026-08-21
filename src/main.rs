@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -14,12 +15,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Scan a file for tainted-data paths into a dangerous sink.
+    /// Scan a Python file or a directory tree for tainted source-to-sink paths.
     Scan {
-        file: String,
+        /// A .py file or a directory (scanned recursively).
+        path: String,
         /// Emit findings as JSON instead of readable paths.
         #[arg(long)]
         json: bool,
+        /// Always exit 0, even when findings exist (default is exit 1 on findings).
+        #[arg(long)]
+        exit_zero: bool,
     },
     /// Serve the HTTP API + paste-and-scan console.
     Serve {
@@ -30,24 +35,81 @@ enum Cmd {
     Mcp,
 }
 
+/// Collect .py files under a path (the path itself if it is a file).
+fn py_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if root.is_file() {
+        out.push(root.to_path_buf());
+        return out;
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name.starts_with('.') || name == "venv" || name == "node_modules" {
+                continue;
+            }
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("py") {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Scan { file, json } => {
-            let src = std::fs::read_to_string(&file)?;
-            let findings = lint_owl::analyze(&src);
-            if json {
-                println!("{}", serde_json::to_string_pretty(&findings)?);
-            } else if findings.is_empty() {
-                println!("no tainted path to a command sink in {file}");
-            } else {
-                println!(
-                    "{} tainted path(s) to a command sink in {file}:\n",
-                    findings.len()
-                );
-                for f in &findings {
-                    println!("{}", lint_owl::render(&src, f));
+        Cmd::Scan { path, json, exit_zero } => {
+            let files = py_files(Path::new(&path));
+            let mut total = 0usize;
+            let mut per_file_json = Vec::new();
+
+            for file in &files {
+                let src = match std::fs::read_to_string(file) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let findings = lint_owl::analyze(&src);
+                total += findings.len();
+                if json {
+                    let mut v = lint_owl::scan_json(&src);
+                    v["file"] = serde_json::json!(file.display().to_string());
+                    per_file_json.push(v);
+                } else if !findings.is_empty() {
+                    println!("== {} ==", file.display());
+                    for f in &findings {
+                        println!("{}", lint_owl::render(&src, f));
+                    }
                 }
+            }
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "files_scanned": files.len(),
+                        "total_findings": total,
+                        "results": per_file_json,
+                    }))?
+                );
+            } else if total == 0 {
+                println!("no tainted paths in {} file(s)", files.len());
+            } else {
+                println!("\n{total} tainted path(s) across {} file(s)", files.len());
+            }
+
+            // Non-zero exit on findings so this is usable in CI and pre-commit.
+            if total > 0 && !exit_zero {
+                std::process::exit(1);
             }
         }
         Cmd::Serve { port } => lint_owl::server::serve(port)?,
