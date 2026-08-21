@@ -501,7 +501,7 @@ fn lex_string(chars: &[char], mut i: usize, toks: &mut Vec<Tok>, fstring: bool, 
             // Keep only the expression: drop the format spec (`:...`), the
             // conversion (`!r`/`!s`), and a trailing debug `=` (`{x=}`).
             let inner = inner
-                .split(|c| c == ':' || c == '!')
+                .split([':', '!'])
                 .next()
                 .unwrap_or("")
                 .trim()
@@ -804,7 +804,7 @@ fn parse_def(buf: &str) -> Option<(String, Vec<String>)> {
     let params = rest[paren + 1..paren + 1 + close]
         .split(',')
         .filter_map(|p| {
-            let id = p.split(|c| c == ':' || c == '=').next().unwrap_or("").trim();
+            let id = p.split([':', '=']).next().unwrap_or("").trim();
             let id = id.trim_start_matches('*');
             if id.is_empty() || id == "self" || id == "cls" {
                 None
@@ -1163,9 +1163,7 @@ fn build_flat(line: usize, toks: Vec<Tok>, lead: &[&str], loop_kw: &str, seps: &
                 })
                 .collect();
             let iter_toks: Vec<Tok> = toks[pos + 1..]
-                .iter()
-                .cloned()
-                .filter(|t| !matches!(t, Tok::RParen))
+                .iter().filter(|&t| !matches!(t, Tok::RParen)).cloned()
                 .collect();
             let mut p = P { toks: iter_toks, pos: 0, depth: 0 };
             let it = p.expr();
@@ -1238,7 +1236,8 @@ pub fn php_config() -> Config {
     for s in ["file_get_contents", "fopen", "readfile"] {
         sinks.push((s.into(), false, "path-traversal".into()));
     }
-    for s in ["file_put_contents"] {
+    {
+        let s = "file_put_contents";
         sinks.push((s.into(), false, "path-traversal".into()));
     }
     Config {
