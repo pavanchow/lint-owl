@@ -41,8 +41,10 @@ enum Cmd {
     Mcp,
 }
 
-/// Collect .py files under a path (the path itself if it is a file).
-fn py_files(root: &Path) -> Vec<PathBuf> {
+const EXTS: &[&str] = &["py", "js", "ts", "jsx", "tsx", "php"];
+
+/// Collect source files under a path (the path itself if it is a file).
+fn source_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if root.is_file() {
         out.push(root.to_path_buf());
@@ -62,7 +64,7 @@ fn py_files(root: &Path) -> Vec<PathBuf> {
             }
             if p.is_dir() {
                 stack.push(p);
-            } else if p.extension().and_then(|s| s.to_str()) == Some("py") {
+            } else if p.extension().and_then(|s| s.to_str()).is_some_and(|e| EXTS.contains(&e)) {
                 out.push(p);
             }
         }
@@ -75,13 +77,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Scan { path, json, sarif, config, exit_zero } => {
-            let mut cfg = lint_owl::python_config();
-            if let Some(cfile) = &config {
-                let raw = std::fs::read_to_string(cfile)?;
-                let v: serde_json::Value = serde_json::from_str(&raw)?;
-                cfg.merge_json(&v);
-            }
-            let files = py_files(Path::new(&path));
+            let files = source_files(Path::new(&path));
             let mut total = 0usize;
             let mut per_file_json = Vec::new();
             let mut for_sarif: Vec<(String, String, Vec<lint_owl::Finding>)> = Vec::new();
@@ -91,12 +87,19 @@ fn main() -> Result<()> {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
-                let findings = lint_owl::analyze_cfg(&src, &cfg);
+                // Language per file, with the user's config additions merged in.
+                let lang = lint_owl::lang_from_ext(&file.to_string_lossy());
+                let mut fcfg = lint_owl::config_for(lang);
+                if let Some(cfile) = &config {
+                    let raw = std::fs::read_to_string(cfile)?;
+                    fcfg.merge_json(&serde_json::from_str(&raw)?);
+                }
+                let findings = lint_owl::analyze_lang(&src, lang, &fcfg);
                 total += findings.len();
                 if sarif {
                     for_sarif.push((file.display().to_string(), src, findings));
                 } else if json {
-                    let mut v = lint_owl::scan_json_cfg(&src, &cfg);
+                    let mut v = lint_owl::scan_json_lang(&src, lang, &fcfg);
                     v["file"] = serde_json::json!(file.display().to_string());
                     per_file_json.push(v);
                 } else if !findings.is_empty() {

@@ -53,16 +53,22 @@ claude mcp add lint-owl -- /path/to/lint-owl mcp
 Tool `lint_owl_scan` takes `{code}` and returns the tainted paths, so an AI reviewing a
 diff can ask "does user input reach a sink here" and get the chain back.
 
+## Languages and output
+
+Scans `.py`, `.js`/`.ts`, and `.php`. Emits readable paths, JSON (`--json`), or SARIF
+(`--sarif`) for GitHub code scanning. Add your framework's sources/sinks with `--config`.
+
 ## Stack
 
-Rust. A hand-written lexer and recursive-descent parser for a Python subset, and a
+Rust. Hand-written lexers and a shared recursive-descent parser per language, and a
 forward taint engine that tracks provenance so every finding carries its source-to-sink
 line chain. See [DESIGN.md](DESIGN.md).
 
 ## Status
 
-v0.2: five vuln classes over a Python subset, source-to-sink paths, directory/repo
-scanning, CI exit codes, basic sanitizer awareness, severity, CLI + HTTP API + console +
-MCP. Two independent audits fixed. Results are candidate paths (no control flow or
-inter-procedural flow yet). Next: control-flow and cross-function taint, more languages,
-and SARIF output.
+v0.3: Python, JavaScript, and PHP. Source-to-sink paths for command injection, SQL
+injection, SSRF, path traversal, insecure deserialization, and more. Control-flow (loop)
+and inter-procedural (cross-function) taint, sanitizer awareness, configurable
+sources/sinks (`--config`), SARIF output (`--sarif`), directory/repo scanning, CI exit
+codes, severity, CLI + HTTP API + console + MCP. Two independent audits fixed. Results are
+candidate paths a human confirms.

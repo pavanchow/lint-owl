@@ -57,7 +57,13 @@ overflowing the stack.
    each source/sink set is data, so this is additive.
 3. HTTP API + a small results UI, then an MCP server (`lint_owl_scan`), mirroring Oracle.
 
-### v0.2
-4. Sanitizer awareness (a tainted value passed through an escaper is cleared).
-5. Control flow and inter-procedural flow (taint across function calls).
-6. A second real language front end.
+### Done since v0.1
+4. Sanitizer awareness (a tainted value through an escaper is cleared).
+5. Control-flow taint: for/foreach loop bindings.
+6. Inter-procedural flow: taint through calls into user functions, plus return taint.
+7. JavaScript and PHP front ends (subsets), reusing the shared taint engine.
+8. SARIF 2.1.0 output and user-configurable sources/sinks.
+
+### Next
+9. Branch-sensitive control flow and sanitizer-on-a-path modeling.
+10. `with ... as` handle binding; more languages (Java, Go).

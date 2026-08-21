@@ -1,11 +1,12 @@
 //! Lint-Owl: a taint static analyzer whose result is the data-flow PATH from an
 //! untrusted source to a dangerous sink, not a flat list of warnings.
 //!
-//! v0.1 proves one property deeply: does taint reach a dangerous sink, over a
-//! Python subset. It handles assignment, string concat, f-string interpolation,
-//! method chaining, `with`/keyword-led statements, semicolons, and multi-line
-//! calls. Honest limits (see DESIGN.md): no control flow, no sanitizers, single
-//! scope, so results are candidate paths a human confirms.
+//! Languages: Python, JavaScript, PHP (each a subset). It tracks taint through
+//! assignment, concatenation, string interpolation (f-strings, template literals,
+//! PHP `"$var"`), method chaining, for/foreach loop bindings (control flow), and
+//! calls into user-defined functions (inter-procedural, with return-value taint).
+//! Sanitizers clear taint. Sources/sinks are configurable. See DESIGN.md for the
+//! honest limits; results are candidate paths a human confirms.
 
 use serde::Serialize;
 use std::collections::HashMap;
@@ -98,7 +99,11 @@ impl Config {
         self.source_calls.iter().any(|s| s == name)
     }
     pub fn is_source_name(&self, name: &str) -> bool {
-        self.source_names.iter().any(|s| s == name)
+        // A source name matches exactly or as a dotted prefix: `req.query` covers
+        // `req.query.id`.
+        self.source_names
+            .iter()
+            .any(|s| name == s || name.starts_with(&format!("{s}.")))
     }
     pub fn is_sanitizer(&self, name: &str) -> bool {
         self.sanitizers.iter().any(|s| s == name)
@@ -247,7 +252,15 @@ pub fn scan_json(src: &str) -> serde_json::Value {
 
 /// As `scan_json`, with an explicit config.
 pub fn scan_json_cfg(src: &str, cfg: &Config) -> serde_json::Value {
-    let findings = analyze_cfg(src, cfg);
+    findings_json(src, &analyze_cfg(src, cfg))
+}
+
+/// As `scan_json`, for a specific language.
+pub fn scan_json_lang(src: &str, lang: Lang, cfg: &Config) -> serde_json::Value {
+    findings_json(src, &analyze_lang(src, lang, cfg))
+}
+
+fn findings_json(src: &str, findings: &[Finding]) -> serde_json::Value {
     let lines: Vec<&str> = src.lines().collect();
     let out: Vec<serde_json::Value> = findings
         .iter()
@@ -1019,7 +1032,7 @@ fn find_sinks(
     findings: &mut Vec<Finding>,
     cfg: &Config,
 ) {
-    let mut report = |name: &str, args: &[Expr], findings: &mut Vec<Finding>| {
+    let report = |name: &str, args: &[Expr], findings: &mut Vec<Finding>| {
         if let Some(class) = cfg.sink_class(name) {
             if let Some(chain) = args.iter().find_map(|a| expr_taint(a, tainted, line, cfg)) {
                 let mut path = chain;
@@ -1052,6 +1065,503 @@ fn find_sinks(
         }
         _ => {}
     }
+}
+
+// ---- Languages ----
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Lang {
+    Python,
+    Js,
+    Php,
+}
+
+pub fn lang_from_ext(path: &str) -> Lang {
+    let p = path.to_ascii_lowercase();
+    if p.ends_with(".js") || p.ends_with(".ts") || p.ends_with(".jsx") || p.ends_with(".tsx") {
+        Lang::Js
+    } else if p.ends_with(".php") {
+        Lang::Php
+    } else {
+        Lang::Python
+    }
+}
+
+pub fn config_for(lang: Lang) -> Config {
+    match lang {
+        Lang::Python => python_config(),
+        Lang::Js => js_config(),
+        Lang::Php => php_config(),
+    }
+}
+
+/// Analyze source in a given language with the default (or provided) config.
+pub fn analyze_lang(src: &str, lang: Lang, cfg: &Config) -> Vec<Finding> {
+    let (top, funcs) = match lang {
+        Lang::Python => parse_program(src),
+        Lang::Js => (flat_program(src, js_statements(src), Lang::Js), HashMap::new()),
+        Lang::Php => (flat_program(src, php_statements(src), Lang::Php), HashMap::new()),
+    };
+    let mut findings = Vec::new();
+    let visited = std::collections::HashSet::new();
+    taint_scope(&top, HashMap::new(), funcs_ref(&funcs), 0, cfg, &mut findings, &visited);
+    findings
+}
+
+fn funcs_ref(f: &HashMap<String, Func>) -> &HashMap<String, Func> {
+    f
+}
+
+fn flat_program(_src: &str, statements: Vec<(usize, Vec<Tok>)>, lang: Lang) -> Vec<Stmt> {
+    let (lead, loop_kw, seps): (&[&str], &str, &[&str]) = match lang {
+        Lang::Js => (
+            &["function", "if", "else", "while", "for", "do", "switch", "case", "try",
+              "catch", "throw", "new", "async", "await", "const", "let", "var", "export",
+              "default", "typeof"],
+            "for",
+            &["of", "in"],
+        ),
+        Lang::Php => (
+            &["if", "else", "elseif", "while", "for", "foreach", "echo", "print", "function",
+              "public", "private", "protected", "static", "new", "throw", "try", "catch",
+              "return"],
+            "foreach",
+            &["as"],
+        ),
+        Lang::Python => (LEAD_KEYWORDS, "for", &["in"]),
+    };
+    let mut out = Vec::new();
+    for (line, toks) in statements {
+        out.extend(build_flat(line, toks, lead, loop_kw, seps));
+    }
+    out
+}
+
+fn build_flat(line: usize, toks: Vec<Tok>, lead: &[&str], loop_kw: &str, seps: &[&str]) -> Vec<Stmt> {
+    let mut out = Vec::new();
+    // loop binding: `LOOP vars SEP iter`
+    if matches!(toks.first(), Some(Tok::Name(n)) if n == loop_kw) {
+        if let Some(pos) = toks
+            .iter()
+            .position(|t| matches!(t, Tok::Name(n) if seps.contains(&n.as_str())))
+        {
+            let vars: Vec<String> = toks[..pos]
+                .iter()
+                .filter_map(|t| match t {
+                    Tok::Name(n) if n != loop_kw && !lead.contains(&n.as_str()) => Some(n.clone()),
+                    _ => None,
+                })
+                .collect();
+            let iter_toks: Vec<Tok> = toks[pos + 1..]
+                .iter()
+                .cloned()
+                .filter(|t| !matches!(t, Tok::RParen))
+                .collect();
+            let mut p = P { toks: iter_toks, pos: 0, depth: 0 };
+            let it = p.expr();
+            for v in vars {
+                out.push(Stmt::Assign { name: v, value: it.clone(), line });
+            }
+            return out;
+        }
+    }
+    if matches!(toks.first(), Some(Tok::Name(n)) if n == "return") {
+        let mut p = P { toks: toks[1..].to_vec(), pos: 0, depth: 0 };
+        out.push(Stmt::Return { value: p.expr(), line });
+        return out;
+    }
+    let mut toks = toks;
+    while matches!(toks.first(), Some(Tok::Name(n)) if lead.contains(&n.as_str())) {
+        toks.remove(0);
+    }
+    if toks.is_empty() {
+        return out;
+    }
+    if let (Some(Tok::Name(n)), Some(Tok::Eq)) = (toks.first(), toks.get(1)) {
+        let name = n.clone();
+        let mut p = P { toks: toks[2..].to_vec(), pos: 0, depth: 0 };
+        out.push(Stmt::Assign { name, value: p.expr(), line });
+    } else {
+        let mut p = P { toks, pos: 0, depth: 0 };
+        out.push(Stmt::Eval { value: p.expr(), line });
+    }
+    out
+}
+
+pub fn js_config() -> Config {
+    let owned = |a: &[&str]| a.iter().map(|s| s.to_string()).collect();
+    let mut sinks: Vec<(String, bool, String)> = Vec::new();
+    for s in ["child_process.exec", "child_process.execSync", "exec", "execSync", "eval", "Function"] {
+        sinks.push((s.into(), false, "command-injection".into()));
+    }
+    sinks.push(("query".into(), true, "sql-injection".into()));
+    for s in ["axios.get", "axios.post", "fetch", "http.get", "https.get", "request", "got"] {
+        sinks.push((s.into(), false, "ssrf".into()));
+    }
+    for s in ["fs.readFile", "fs.readFileSync", "fs.createReadStream"] {
+        sinks.push((s.into(), false, "path-traversal".into()));
+    }
+    Config {
+        source_calls: owned(&["req.query.get"]),
+        source_names: owned(&[
+            "req.query", "req.body", "req.params", "req.cookies", "req.headers",
+            "process.argv", "process.env", "location.search", "location.hash", "document.URL",
+        ]),
+        sanitizers: owned(&["parseInt", "parseFloat", "Number", "encodeURIComponent"]),
+        sinks,
+    }
+}
+
+pub fn php_config() -> Config {
+    let owned = |a: &[&str]| a.iter().map(|s| s.to_string()).collect();
+    let mut sinks: Vec<(String, bool, String)> = Vec::new();
+    for s in ["system", "exec", "shell_exec", "passthru", "popen", "proc_open", "eval"] {
+        sinks.push((s.into(), false, "command-injection".into()));
+    }
+    for s in ["mysqli_query", "mysql_query", "pg_query"] {
+        sinks.push((s.into(), false, "sql-injection".into()));
+    }
+    sinks.push(("query".into(), true, "sql-injection".into()));
+    for s in ["include", "require", "include_once", "require_once"] {
+        sinks.push((s.into(), false, "file-inclusion".into()));
+    }
+    for s in ["file_get_contents", "fopen", "readfile"] {
+        sinks.push((s.into(), false, "path-traversal".into()));
+    }
+    for s in ["file_put_contents"] {
+        sinks.push((s.into(), false, "path-traversal".into()));
+    }
+    Config {
+        source_calls: owned(&[]),
+        source_names: owned(&["$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_SERVER", "$_FILES"]),
+        sanitizers: owned(&[
+            "intval", "floatval", "escapeshellarg", "escapeshellcmd",
+            "mysqli_real_escape_string", "htmlspecialchars", "addslashes", "basename",
+        ]),
+        sinks,
+    }
+}
+
+/// Tokenize JavaScript into statements (split on `;`, `{`, `}`). Dotted names,
+/// `+` concat, template literals with `${}`, and `//` `/* */` comments.
+#[allow(unused_assignments)]
+fn js_statements(src: &str) -> Vec<(usize, Vec<Tok>)> {
+    let ch: Vec<char> = src.chars().collect();
+    let n = ch.len();
+    let is_name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '.');
+    let mut i = 0;
+    let mut line = 1usize;
+    let mut sl = 1usize;
+    let mut cur: Vec<Tok> = Vec::new();
+    let mut out: Vec<(usize, Vec<Tok>)> = Vec::new();
+    macro_rules! flush {
+        () => {
+            if !cur.is_empty() {
+                out.push((sl, std::mem::take(&mut cur)));
+            }
+            sl = line;
+        };
+    }
+    while i < n {
+        let c = ch[i];
+        match c {
+            '\n' => {
+                line += 1;
+                i += 1;
+                if cur.is_empty() {
+                    sl = line;
+                }
+            }
+            '/' if ch.get(i + 1) == Some(&'/') => {
+                while i < n && ch[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if ch.get(i + 1) == Some(&'*') => {
+                i += 2;
+                while i < n && !(ch[i] == '*' && ch.get(i + 1) == Some(&'/')) {
+                    if ch[i] == '\n' {
+                        line += 1;
+                    }
+                    i += 1;
+                }
+                i += 2;
+            }
+            ' ' | '\t' | '\r' => i += 1,
+            ';' | '{' | '}' => {
+                flush!();
+                i += 1;
+            }
+            '(' => {
+                cur.push(Tok::LParen);
+                i += 1;
+            }
+            ')' => {
+                cur.push(Tok::RParen);
+                i += 1;
+            }
+            ',' => {
+                cur.push(Tok::Comma);
+                i += 1;
+            }
+            '+' => {
+                cur.push(Tok::Plus);
+                i += 1;
+            }
+            '=' => {
+                if ch.get(i + 1) == Some(&'>') {
+                    i += 2;
+                } else if ch.get(i + 1) == Some(&'=') {
+                    i += if ch.get(i + 2) == Some(&'=') { 3 } else { 2 };
+                    cur.push(Tok::Lit);
+                } else {
+                    cur.push(Tok::Eq);
+                    i += 1;
+                }
+            }
+            '"' | '\'' => {
+                let q = c;
+                i += 1;
+                while i < n {
+                    if ch[i] == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if ch[i] == q || ch[i] == '\n' {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                cur.push(Tok::Lit);
+            }
+            '`' => {
+                // Template literal: literal parts Lit, ${expr} interpolations grouped.
+                i += 1;
+                cur.push(Tok::Lit);
+                while i < n && ch[i] != '`' {
+                    if ch[i] == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if ch[i] == '$' && ch.get(i + 1) == Some(&'{') {
+                        let start = i + 2;
+                        let mut j = start;
+                        let mut d = 1;
+                        while j < n && d > 0 {
+                            match ch[j] {
+                                '{' => d += 1,
+                                '}' => d -= 1,
+                                _ => {}
+                            }
+                            if d == 0 {
+                                break;
+                            }
+                            j += 1;
+                        }
+                        let inner: String = ch[start..j].iter().collect();
+                        for (_, mut t) in js_statements(&inner) {
+                            cur.push(Tok::Plus);
+                            cur.push(Tok::LParen);
+                            cur.append(&mut t);
+                            cur.push(Tok::RParen);
+                        }
+                        i = j + 1;
+                        continue;
+                    }
+                    if ch[i] == '\n' {
+                        line += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            c if c.is_ascii_digit() => {
+                while i < n && (ch[i].is_ascii_digit() || ch[i] == '.') {
+                    i += 1;
+                }
+                cur.push(Tok::Lit);
+            }
+            c if is_name(c) => {
+                let s0 = i;
+                while i < n && is_name(ch[i]) {
+                    i += 1;
+                }
+                if cur.is_empty() {
+                    // keep sl at the statement start
+                }
+                cur.push(Tok::Name(ch[s0..i].iter().collect()));
+            }
+            _ => i += 1,
+        }
+    }
+    flush!();
+    out
+}
+
+/// Tokenize PHP into statements. `$vars`, `->` as method access, `.` as concat,
+/// double-quoted `$var` interpolation, `//` `#` `/* */` comments.
+#[allow(unused_assignments)]
+fn php_statements(src: &str) -> Vec<(usize, Vec<Tok>)> {
+    let ch: Vec<char> = src.chars().collect();
+    let n = ch.len();
+    let is_name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '$');
+    let mut i = 0;
+    let mut line = 1usize;
+    let mut sl = 1usize;
+    let mut cur: Vec<Tok> = Vec::new();
+    let mut out: Vec<(usize, Vec<Tok>)> = Vec::new();
+    macro_rules! flush {
+        () => {
+            if !cur.is_empty() {
+                out.push((sl, std::mem::take(&mut cur)));
+            }
+            sl = line;
+        };
+    }
+    while i < n {
+        let c = ch[i];
+        match c {
+            '<' if ch.get(i + 1) == Some(&'?') => {
+                i += 2;
+                if ch.get(i) == Some(&'p') && ch.get(i + 1) == Some(&'h') && ch.get(i + 2) == Some(&'p') {
+                    i += 3;
+                }
+            }
+            '?' if ch.get(i + 1) == Some(&'>') => i += 2,
+            '\n' => {
+                line += 1;
+                i += 1;
+                if cur.is_empty() {
+                    sl = line;
+                }
+            }
+            '/' if ch.get(i + 1) == Some(&'/') => {
+                while i < n && ch[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '#' => {
+                while i < n && ch[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if ch.get(i + 1) == Some(&'*') => {
+                i += 2;
+                while i < n && !(ch[i] == '*' && ch.get(i + 1) == Some(&'/')) {
+                    if ch[i] == '\n' {
+                        line += 1;
+                    }
+                    i += 1;
+                }
+                i += 2;
+            }
+            ' ' | '\t' | '\r' => i += 1,
+            ';' | '{' | '}' => {
+                flush!();
+                i += 1;
+            }
+            '-' if ch.get(i + 1) == Some(&'>') => {
+                i += 2;
+                let s0 = i;
+                while i < n && is_name(ch[i]) {
+                    i += 1;
+                }
+                let name: String = ch[s0..i].iter().collect();
+                cur.push(Tok::Name(format!(".{name}")));
+            }
+            '.' => {
+                cur.push(Tok::Plus);
+                i += 1;
+            }
+            '(' => {
+                cur.push(Tok::LParen);
+                i += 1;
+            }
+            ')' => {
+                cur.push(Tok::RParen);
+                i += 1;
+            }
+            ',' => {
+                cur.push(Tok::Comma);
+                i += 1;
+            }
+            '+' => {
+                cur.push(Tok::Plus);
+                i += 1;
+            }
+            '=' => {
+                if ch.get(i + 1) == Some(&'=') {
+                    i += if ch.get(i + 2) == Some(&'=') { 3 } else { 2 };
+                    cur.push(Tok::Lit);
+                } else if ch.get(i + 1) == Some(&'>') {
+                    i += 2;
+                } else {
+                    cur.push(Tok::Eq);
+                    i += 1;
+                }
+            }
+            '\'' => {
+                i += 1;
+                while i < n {
+                    if ch[i] == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if ch[i] == '\'' || ch[i] == '\n' {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                cur.push(Tok::Lit);
+            }
+            '"' => {
+                // double-quoted string: interpolate $var
+                i += 1;
+                cur.push(Tok::Lit);
+                while i < n && ch[i] != '"' {
+                    if ch[i] == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if ch[i] == '$' {
+                        let s0 = i;
+                        i += 1;
+                        while i < n && is_name(ch[i]) {
+                            i += 1;
+                        }
+                        cur.push(Tok::Plus);
+                        cur.push(Tok::Name(ch[s0..i].iter().collect()));
+                        cur.push(Tok::Plus);
+                        cur.push(Tok::Lit);
+                        continue;
+                    }
+                    if ch[i] == '\n' {
+                        line += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            c if c.is_ascii_digit() => {
+                while i < n && (ch[i].is_ascii_digit() || ch[i] == '.') {
+                    i += 1;
+                }
+                cur.push(Tok::Lit);
+            }
+            c if is_name(c) => {
+                let s0 = i;
+                while i < n && is_name(ch[i]) {
+                    i += 1;
+                }
+                cur.push(Tok::Name(ch[s0..i].iter().collect()));
+            }
+            _ => i += 1,
+        }
+    }
+    flush!();
+    out
 }
 
 #[cfg(test)]
@@ -1253,6 +1763,46 @@ mod tests {
         assert_eq!(f[0].severity(), "critical");
         let f2 = analyze("u = request.args.get(\"u\")\nrequests.get(u)\n");
         assert_eq!(f2[0].severity(), "high");
+    }
+
+    #[test]
+    fn js_command_injection() {
+        let src = "const cmd = req.query.cmd;\nchild_process.exec(cmd);\n";
+        let f = analyze_lang(src, Lang::Js, &js_config());
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "command-injection");
+    }
+
+    #[test]
+    fn js_template_literal_ssrf() {
+        let src = "const u = req.query.url;\naxios.get(`https://api/${u}`);\n";
+        let f = analyze_lang(src, Lang::Js, &js_config());
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "ssrf");
+    }
+
+    #[test]
+    fn php_command_injection() {
+        let src = "<?php\n$cmd = $_GET['cmd'];\nsystem($cmd);\n";
+        let f = analyze_lang(src, Lang::Php, &php_config());
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "command-injection");
+    }
+
+    #[test]
+    fn php_interpolated_string_and_concat() {
+        let src = "<?php\n$name = $_POST['name'];\n$q = \"SELECT * FROM u WHERE n='$name'\";\nmysqli_query($conn, $q);\n";
+        let f = analyze_lang(src, Lang::Php, &php_config());
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "sql-injection");
+    }
+
+    #[test]
+    fn php_method_query_sink() {
+        let src = "<?php\n$id = $_GET['id'];\n$db->query(\"select \" . $id);\n";
+        let f = analyze_lang(src, Lang::Php, &php_config());
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "sql-injection");
     }
 
     #[test]
