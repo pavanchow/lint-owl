@@ -14,13 +14,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Scan a file for tainted-data paths into a command sink.
+    /// Scan a file for tainted-data paths into a dangerous sink.
     Scan {
         file: String,
         /// Emit findings as JSON instead of readable paths.
         #[arg(long)]
         json: bool,
     },
+    /// Serve the HTTP API + paste-and-scan console.
+    Serve {
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
+    /// Run as an MCP server over stdio so an agent can scan code.
+    Mcp,
 }
 
 fn main() -> Result<()> {
@@ -43,6 +50,8 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Cmd::Serve { port } => lint_owl::server::serve(port)?,
+        Cmd::Mcp => lint_owl::mcp::serve_mcp()?,
     }
     Ok(())
 }

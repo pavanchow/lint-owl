@@ -8,6 +8,9 @@
 use serde::Serialize;
 use std::collections::HashMap;
 
+pub mod mcp;
+pub mod server;
+
 // ---- What counts as a source and a sink (command injection, v0.1) ----
 
 /// Calls that return attacker-controlled data, e.g. `input()`.
@@ -115,6 +118,39 @@ impl Finding {
 pub fn analyze(src: &str) -> Vec<Finding> {
     let stmts = parse(src);
     run_taint(&stmts)
+}
+
+/// Scan source and return findings as JSON, each with its source-to-sink hops
+/// (line, tag, code). Shared by the HTTP API and the MCP server.
+pub fn scan_json(src: &str) -> serde_json::Value {
+    let findings = analyze(src);
+    let lines: Vec<&str> = src.lines().collect();
+    let out: Vec<serde_json::Value> = findings
+        .iter()
+        .map(|f| {
+            let hops: Vec<serde_json::Value> = f
+                .path
+                .iter()
+                .enumerate()
+                .map(|(i, &ln)| {
+                    let tag = if i == 0 {
+                        "source"
+                    } else if i == f.path.len() - 1 {
+                        "sink"
+                    } else {
+                        "flows"
+                    };
+                    serde_json::json!({
+                        "line": ln,
+                        "tag": tag,
+                        "code": lines.get(ln - 1).map(|s| s.trim()).unwrap_or(""),
+                    })
+                })
+                .collect();
+            serde_json::json!({ "vuln": f.vuln, "path": hops })
+        })
+        .collect();
+    serde_json::json!({ "count": findings.len(), "findings": out })
 }
 
 /// Render a finding as its source-to-sink chain against the original source.

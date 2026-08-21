@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lint-Owl console</title>
+<style>
+  :root {
+    --bg:#fbfbf9; --panel:#fff; --ink:#16181a; --muted:#6b7280; --line:#e6e6e2;
+    --accent:#7c5cff; --accent-soft:#efeaff;
+    --crit:#b91c1c; --high:#c2410c; --med:#a16207;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+  header{padding:26px 28px 18px;border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:22px;letter-spacing:-0.01em}
+  .sub{color:var(--muted);margin-top:4px;font-size:14px}
+  main{max-width:1000px;margin:0 auto;padding:24px 28px 60px}
+  textarea{width:100%;min-height:200px;padding:14px;border:1px solid var(--line);
+    border-radius:12px;font:13.5px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
+    background:var(--panel);resize:vertical}
+  textarea:focus{outline:none;border-color:var(--accent)}
+  .row{display:flex;gap:10px;align-items:center;margin-top:12px}
+  button{padding:11px 20px;border:none;border-radius:10px;background:var(--accent);
+    color:#fff;font:inherit;font-weight:600;cursor:pointer}
+  .note{color:var(--muted);font-size:13px;margin:20px 0 8px}
+  .err{color:var(--crit);background:#fef2f2;border:1px solid #fecaca;padding:12px 14px;border-radius:10px;margin-top:14px}
+  .finding{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-top:14px}
+  .badge{display:inline-block;font-size:12px;font-weight:700;padding:4px 10px;border-radius:8px;margin-bottom:12px}
+  .b-critical{background:#fef2f2;color:var(--crit);border:1px solid #fecaca}
+  .b-high{background:#fff7ed;color:var(--high);border:1px solid #fed7aa}
+  .hop{display:flex;gap:10px;align-items:baseline;padding:3px 0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+  .tag{width:58px;flex:none;font-weight:700;text-transform:uppercase;font-size:10.5px;letter-spacing:.08em}
+  .t-source{color:var(--high)} .t-flows{color:var(--muted)} .t-sink{color:var(--crit)}
+  .ln{color:var(--muted);width:56px;flex:none}
+  .code{color:var(--ink);word-break:break-word}
+</style>
+</head>
+<body>
+<header>
+  <h1>Lint-Owl console</h1>
+  <div class="sub">Paste code. Get the data-flow path from an untrusted source to a dangerous sink.</div>
+</header>
+<main>
+  <textarea id="code" spellcheck="false">import os
+
+def handle(request):
+    host = request.args.get("host")
+    cmd = "ping -c 1 " + host
+    os.system(cmd)</textarea>
+  <div class="row"><button onclick="scan()">Scan</button></div>
+  <div id="out"></div>
+</main>
+<script>
+const out=document.getElementById('out');
+const SEV={'command-injection':'critical','sql-injection':'critical','insecure-deserialization':'critical','ssrf':'high','path-traversal':'high'};
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function scan(){
+  out.innerHTML='<div class="note">Scanning...</div>';
+  try{
+    const res=await fetch('/scan',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({code:document.getElementById('code').value})});
+    const d=await res.json();
+    if(!res.ok||d.error){out.innerHTML=`<div class="err">${esc(d.error||'scan failed')}</div>`;return}
+    if(!d.count){out.innerHTML='<div class="note">No tainted path to a sink found.</div>';return}
+    let html=`<div class="note">${d.count} tainted path${d.count>1?'s':''} found</div>`;
+    for(const f of d.findings){
+      const sev=SEV[f.vuln]||'high';
+      let hops='';
+      for(const h of f.path){
+        hops+=`<div class="hop"><span class="tag t-${esc(h.tag)}">${esc(h.tag)}</span><span class="ln">line ${h.line}</span><span class="code">${esc(h.code)}</span></div>`;
+      }
+      html+=`<div class="finding"><span class="badge b-${sev}">${esc(f.vuln)}</span>${hops}</div>`;
+    }
+    out.innerHTML=html;
+  }catch(e){out.innerHTML=`<div class="err">${esc(e.message)}</div>`}
+}
+scan();
+</script>
+</body>
+</html>

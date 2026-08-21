@@ -29,6 +29,25 @@ reaches the sink. CodeQL proves it but is heavy and needs a database and a query
 language. Lint-Owl is one small binary whose output is the tainted path itself, and it
 is built to be agent-native (an MCP tool an AI asks "does user input reach this exec").
 
+## HTTP API and console
+
+```
+cargo run -- serve --port 8080
+```
+
+Open the URL, paste code, and see each finding as a source-to-sink chain with severity
+badges. Or POST directly: `curl -s localhost:8080/scan -H 'content-type: application/json' -d '{"code":"..."}'`.
+
+## MCP server (agent-native)
+
+```
+cargo run -- mcp
+claude mcp add lint-owl -- /path/to/lint-owl mcp
+```
+
+Tool `lint_owl_scan` takes `{code}` and returns the tainted paths, so an AI reviewing a
+diff can ask "does user input reach a sink here" and get the chain back.
+
 ## Stack
 
 Rust. A hand-written lexer and recursive-descent parser for a Python subset, and a
