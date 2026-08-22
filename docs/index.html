@@ -1,86 +1,125 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Lint-Owl: a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink</title>
-  <meta name="description" content="Lint-Owl is a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink. Command injection, SQL injection, SSRF, path traversal, insecure deserialization. Agent-native taint analysis for bug bounty and code review. By Pavan Nallamothu.">
-  <meta name="author" content="Pavan Nallamothu">
-  <meta name="keywords" content="static analyzer, taint analysis, data flow analysis, source to sink, command injection, SQL injection, SSRF, path traversal, bug bounty, code review, Pavan Nallamothu">
-  <link rel="canonical" href="https://pavanchow.github.io/lint-owl/">
-  <meta property="og:type" content="website">
-  <meta property="og:title" content="Lint-Owl: a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink">
-  <meta property="og:description" content="The output is the tainted path itself: source line, each hop, sink line. Agent-native. By Pavan Nallamothu.">
-  <meta property="og:url" content="https://pavanchow.github.io/lint-owl/">
-  <meta name="twitter:card" content="summary">
-  <script type="application/ld+json">
-  {"@context":"https://schema.org","@type":"SoftwareApplication","name":"Lint-Owl","applicationCategory":"SecurityApplication","softwareVersion":"0.1.0","author":{"@type":"Person","name":"Pavan Nallamothu"},"description":"A static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink.","url":"https://pavanchow.github.io/lint-owl/","codeRepository":"https://github.com/pavanchow/lint-owl"}
-  </script>
-  <style>
-    :root{--bg:#fbfbf9;--ink:#16181a;--muted:#5c6360;--line:#e6e6e2;--accent:#7c5cff;
-      --crit:#b91c1c;--high:#c2410c;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
-    *{box-sizing:border-box;margin:0;padding:0}
-    body{background:var(--bg);color:var(--ink);
-      font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
-      -webkit-font-smoothing:antialiased}
-    .wrap{max-width:1000px;margin:0 auto;padding:0 28px}
-    nav{display:flex;justify-content:space-between;align-items:center;height:68px;font-size:15px}
-    nav .v{color:var(--muted);font-family:var(--mono);font-size:12.5px}
-    section{padding:120px 0;border-top:1px solid var(--line)}
-    section:first-of-type{border-top:none}
-    .eyebrow{font-family:var(--mono);font-size:12.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);text-align:center}
-    h1{font-size:clamp(40px,7vw,76px);line-height:1.04;letter-spacing:-0.035em;font-weight:650;text-align:center;margin:26px 0 0}
-    .hero p{max-width:660px;margin:32px auto 0;text-align:center;font-size:clamp(18px,2.3vw,22px);color:var(--muted)}
-    .cta{display:flex;justify-content:center;margin-top:44px}
-    .btn{display:inline-block;padding:14px 26px;border-radius:999px;background:var(--accent);color:#fff;font-weight:600;text-decoration:none}
-    h2{font-size:clamp(28px,4.4vw,46px);line-height:1.12;letter-spacing:-0.028em;font-weight:640;text-align:center;max-width:760px;margin:0 auto}
-    .lead{max-width:620px;margin:28px auto 0;text-align:center;color:var(--muted);font-size:18px}
-    .finding{max-width:680px;margin:56px auto 0;background:#fff;border:1px solid var(--line);border-radius:14px;padding:22px 24px;font-family:var(--mono);font-size:14px}
-    .badge{display:inline-block;font-size:12px;font-weight:700;padding:4px 10px;border-radius:8px;margin-bottom:14px;background:#fef2f2;color:var(--crit);border:1px solid #fecaca}
-    .hop{display:flex;gap:12px;align-items:baseline;padding:4px 0}
-    .tag{width:56px;flex:none;font-weight:700;text-transform:uppercase;font-size:10.5px;letter-spacing:.08em}
-    .t-source{color:var(--high)}.t-flows{color:var(--muted)}.t-sink{color:var(--crit)}
-    .ln{color:var(--muted);width:56px;flex:none}
-    .rows{max-width:760px;margin:44px auto 0}
-    .rows .r{display:grid;grid-template-columns:minmax(150px,1fr) 2fr;gap:14px 36px;padding:26px 0;border-top:1px solid var(--line)}
-    .rows .r b{font-size:18px}.rows .r p{color:var(--muted)}
-    .chips{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;max-width:720px;margin:44px auto 0}
-    .chip{font-family:var(--mono);font-size:13px;padding:8px 14px;border:1px solid var(--line);border-radius:999px;background:#fff}
-    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:14px;overflow:hidden;max-width:760px;margin:48px auto 0}
-    .grid .cell{background:#fff;padding:26px 24px}
-    .grid .k{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:8px}
-    footer{padding:70px 0;border-top:1px solid var(--line);text-align:center;color:var(--muted)}
-    footer a{color:var(--accent);text-decoration:none;font-family:var(--mono);font-size:14px}
-    .demo-panel{max-width:760px;margin:48px auto 0;background:#fff;border:1px solid var(--line);border-radius:14px;padding:24px}
-    .demo-top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
-    .demo-presets{display:flex;gap:8px;flex-wrap:wrap}
-    .preset{font-family:var(--mono);font-size:12.5px;padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:#fff;color:var(--muted);cursor:pointer}
-    .preset.active{background:var(--ink);color:#fff;border-color:var(--ink)}
-    #demo-lang{font-family:var(--mono);font-size:12.5px;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:#fff;color:var(--ink)}
-    #demo-code{width:100%;min-height:150px;font-family:var(--mono);font-size:13.5px;line-height:1.55;padding:14px;border:1px solid var(--line);border-radius:10px;resize:vertical;background:var(--bg);color:var(--ink)}
-    .demo-actions{display:flex;justify-content:flex-end;margin-top:14px}
-    .demo-actions .btn{padding:10px 22px;font-size:14px;cursor:pointer;border:none}
-    #demo-output{margin-top:22px}
-    .safe-box{border:1px solid var(--line);border-radius:12px;padding:18px 20px;font-family:var(--mono);font-size:14px;color:var(--muted)}
-    .badge.high{background:#fff7ed;color:var(--high);border-color:#fed7aa}
-    .badge-safe{display:inline-block;font-size:12px;font-weight:700;padding:4px 10px;border-radius:8px;margin-bottom:14px;background:#f1f5f2;color:#166534;border:1px solid #bbf7d0}
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lint-Owl: a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink</title>
+<meta name="description" content="Lint-Owl is a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink. Command injection, SQL injection, SSRF, path traversal, insecure deserialization. Agent-native taint analysis for bug bounty and code review. By Pavan Nallamothu.">
+<meta name="author" content="Pavan Nallamothu">
+<meta name="keywords" content="static analyzer, taint analysis, data flow analysis, source to sink, command injection, SQL injection, SSRF, path traversal, bug bounty, code review, Pavan Nallamothu">
+<link rel="canonical" href="https://pavanchow.github.io/lint-owl/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Lint-Owl: a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink">
+<meta property="og:description" content="The output is the tainted path itself: source line, each hop, sink line. Agent-native. By Pavan Nallamothu.">
+<meta property="og:url" content="https://pavanchow.github.io/lint-owl/">
+<meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Lint-Owl","applicationCategory":"SecurityApplication","softwareVersion":"0.1.0","author":{"@type":"Person","name":"Pavan Nallamothu"},"description":"A static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink.","url":"https://pavanchow.github.io/lint-owl/","codeRepository":"https://github.com/pavanchow/lint-owl"}
+</script>
+<style>
+  :root{
+    --accent:#7c5cff;--accent-soft:#f1edff;
+    --ink:#15161c;--muted:#6a6d78;--faint:#9a9dab;
+    --line:#ececed;--panel:#f7f7f9;--panel2:#fbfbfd;
+    --crit:#b91c1c;--high:#c2410c;
+    --mono:ui-monospace,SFMono-Regular,Menlo,"SF Mono",monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:#fff;color:var(--ink);
+    font:17px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 28px}
+  a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+
+  nav{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.82);backdrop-filter:saturate(180%) blur(20px);border-bottom:1px solid var(--line)}
+  nav .row{display:flex;justify-content:space-between;align-items:center;height:56px;max-width:1040px;margin:0 auto;padding:0 28px}
+  nav .brand{display:flex;align-items:center;gap:9px;font-size:18px;font-weight:650;letter-spacing:-.01em}
+  nav .brand .gem{width:16px;height:16px;transform:rotate(45deg);border-radius:3px;background:linear-gradient(135deg,#b6a4ff,var(--accent))}
+  nav .brand .v{color:var(--faint);font-family:var(--mono);font-size:12px;font-weight:500;margin-left:4px}
+  nav .links{display:flex;gap:26px;align-items:center}
+  nav .links a{color:var(--ink);font-size:14.5px}
+  nav .links a.gh{color:#fff;background:var(--ink);padding:8px 16px;border-radius:999px;font-size:13.5px}
+  nav .links a.gh:hover{background:var(--accent);text-decoration:none}
+  @media(max-width:640px){nav .links a:not(.gh){display:none}}
+
+  .hero{padding:76px 0 30px;text-align:center}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent)}
+  h1{font-size:clamp(40px,7vw,72px);line-height:1.03;letter-spacing:-.035em;font-weight:680;margin:18px 0 0}
+  .hero p.sub{max-width:640px;margin:24px auto 0;font-size:clamp(17px,2.1vw,21px);color:var(--muted)}
+  .cta{display:flex;gap:14px;justify-content:center;margin-top:38px;flex-wrap:wrap}
+  .btn{display:inline-block;padding:13px 26px;border-radius:999px;background:var(--ink);color:#fdfdfc;font-weight:600;font-size:15px;border:1px solid transparent;cursor:pointer}
+  .btn:hover{background:var(--accent);text-decoration:none}
+  .btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+  .btn.ghost:hover{border-color:var(--accent);color:var(--accent);background:transparent}
+
+  .stage{max-width:900px;margin:44px auto 0;padding:0 28px}
+  .card{position:relative;background:linear-gradient(180deg,#fbfaff,#f4f2fb);border:1px solid var(--line);border-radius:22px;overflow:hidden;box-shadow:0 1px 0 #fff inset,0 18px 50px -30px rgba(70,50,140,.35);padding:26px}
+
+  section{padding:92px 0;border-top:1px solid var(--line)}
+  section:first-of-type{border-top:none}
+  h2{font-size:clamp(27px,4.2vw,42px);line-height:1.12;letter-spacing:-.025em;font-weight:660;text-align:center;max-width:760px;margin:0 auto}
+  .lead{max-width:620px;margin:22px auto 0;text-align:center;color:var(--muted);font-size:18px}
+
+  .finding{max-width:640px;margin:44px auto 0;background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:22px 24px;font-family:var(--mono);font-size:14px}
+  .badge{display:inline-block;font-size:12px;font-weight:700;padding:4px 10px;border-radius:8px;margin-bottom:14px;background:#fef2f2;color:var(--crit);border:1px solid #fecaca}
+  .badge.high{background:#fff7ed;color:var(--high);border-color:#fed7aa}
+  .badge-safe{display:inline-block;font-size:12px;font-weight:700;padding:4px 10px;border-radius:8px;margin-bottom:14px;background:#f1f5f2;color:#166534;border:1px solid #bbf7d0}
+  .hop{display:flex;gap:12px;align-items:baseline;padding:4px 0}
+  .tag{width:56px;flex:none;font-weight:700;text-transform:uppercase;font-size:10.5px;letter-spacing:.08em}
+  .t-source{color:var(--high)}.t-flows{color:var(--muted)}.t-sink{color:var(--crit)}
+  .ln{color:var(--muted);width:56px;flex:none}
+
+  .rows{max-width:760px;margin:44px auto 0}
+  .rows .r{display:grid;grid-template-columns:minmax(150px,1fr) 2fr;gap:14px 36px;padding:26px 0;border-top:1px solid var(--line)}
+  .rows .r b{font-size:18px}.rows .r p{color:var(--muted)}
+
+  .chips{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;max-width:720px;margin:44px auto 0}
+  .chip{font-family:var(--mono);font-size:13px;padding:8px 14px;border:1px solid var(--line);border-radius:999px;background:var(--panel2)}
+
+  .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:14px;overflow:hidden;max-width:760px;margin:48px auto 0}
+  .grid .cell{background:#fff;padding:26px 24px}
+  .grid .k{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:8px}
+
+  footer{padding:64px 0;border-top:1px solid var(--line);text-align:center;color:var(--muted)}
+  footer .name{color:var(--ink);font-weight:600}
+
+  .demo-top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+  .demo-presets{display:flex;gap:8px;flex-wrap:wrap}
+  .preset{font-family:var(--mono);font-size:12.5px;padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:#fff;color:var(--muted);cursor:pointer}
+  .preset.active{background:var(--ink);color:#fff;border-color:var(--ink)}
+  #demo-lang{font-family:var(--mono);font-size:12.5px;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:#fff;color:var(--ink)}
+  #demo-code{width:100%;min-height:150px;font-family:var(--mono);font-size:13.5px;line-height:1.55;padding:14px;border:1px solid var(--line);border-radius:10px;resize:vertical;background:#fff;color:var(--ink)}
+  .demo-actions{display:flex;justify-content:flex-end;margin-top:14px}
+  .demo-actions .btn{padding:10px 22px;font-size:14px;cursor:pointer;border:none}
+  #demo-output{margin-top:22px}
+  .safe-box{border:1px solid var(--line);border-radius:12px;padding:18px 20px;font-family:var(--mono);font-size:14px;color:var(--muted);background:var(--panel2)}
+  .demo-caption{font-family:var(--mono);font-size:12px;color:var(--faint);margin-top:16px;text-align:center}
+</style>
 </head>
 <body>
-  <div class="wrap">
-    <nav><b>Lint-Owl</b><span class="v">v0.1.0</span></nav>
+  <nav><div class="row">
+    <div class="brand"><span class="gem"></span>Lint-Owl<span class="v">v0.1.0</span></div>
+    <div class="links">
+      <a href="#demo">Demo</a><a href="#how">How it differs</a><a href="#classes">Classes</a>
+      <a class="gh" href="https://github.com/pavanchow/lint-owl">GitHub</a>
+    </div>
+  </div></nav>
 
-    <section class="hero">
-      <p class="eyebrow">Open source, agent-native</p>
-      <h1>Show me the path,<br>not the warning.</h1>
-      <p>Lint-Owl is a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink. It proves that user input actually reaches the exploit, and shows the exact chain.</p>
-      <div class="cta"><a class="btn" href="https://github.com/pavanchow/lint-owl">View on GitHub</a></div>
-    </section>
+  <div class="hero">
+    <p class="eyebrow">Open source, agent-native</p>
+    <h1>Show me the path,<br>not the warning.</h1>
+    <p class="sub">Lint-Owl is a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink. It proves that user input actually reaches the exploit, and shows the exact chain.</p>
+    <div class="cta">
+      <a class="btn" href="https://github.com/pavanchow/lint-owl">View on GitHub</a>
+      <a class="btn ghost" href="#demo">Try the demo</a>
+    </div>
+  </div>
 
-    <section id="demo">
-      <h2>Run the taint engine yourself.</h2>
-      <p class="lead">This box runs a small taint tracer in your browser, built from the same sources, sanitizers, and sinks as the real analyzer. Edit the code and press Scan to see the path it finds.</p>
-      <div class="demo-panel">
+  <section id="demo">
+    <h2>Run the taint engine yourself.</h2>
+    <p class="lead">This box runs a small taint tracer in your browser, built from the same sources, sanitizers, and sinks as the real analyzer. Edit the code and press Scan to see the path it finds.</p>
+    <div class="stage">
+      <div class="card">
         <div class="demo-top">
           <div class="demo-presets">
             <button type="button" class="preset" data-preset="cmd">Command injection</button>
@@ -96,64 +135,67 @@
         <div class="demo-actions"><button type="button" class="btn" id="demo-scan">Scan</button></div>
         <div id="demo-output"></div>
       </div>
-    </section>
+      <p class="demo-caption">runs entirely in your browser, same sources, sanitizers, and sinks as the CLI</p>
+    </div>
+  </section>
 
-    <section>
-      <h2>A finding is a path, not a line number.</h2>
-      <p class="lead">Most tools point at a line and say "this looks risky." Lint-Owl follows the taint from where it enters to where it detonates.</p>
-      <div class="finding">
-        <span class="badge">command-injection</span>
-        <div class="hop"><span class="tag t-source">source</span><span class="ln">line 4</span><span>host = request.args.get("host")</span></div>
-        <div class="hop"><span class="tag t-flows">flows</span><span class="ln">line 5</span><span>cmd = "ping -c 1 " + host</span></div>
-        <div class="hop"><span class="tag t-sink">sink</span><span class="ln">line 6</span><span>os.system(cmd)</span></div>
-      </div>
-    </section>
+  <section>
+    <h2>A finding is a path, not a line number.</h2>
+    <p class="lead">Most tools point at a line and say this looks risky. Lint-Owl follows the taint from where it enters to where it detonates.</p>
+    <div class="finding">
+      <span class="badge">command-injection</span>
+      <div class="hop"><span class="tag t-source">source</span><span class="ln">line 4</span><span>host = request.args.get("host")</span></div>
+      <div class="hop"><span class="tag t-flows">flows</span><span class="ln">line 5</span><span>cmd = "ping -c 1 " + host</span></div>
+      <div class="hop"><span class="tag t-sink">sink</span><span class="ln">line 6</span><span>os.system(cmd)</span></div>
+    </div>
+  </section>
 
-    <section>
-      <h2>How it differs</h2>
-      <div class="rows">
-        <div class="r"><b>Linters</b><p>Flag local smells. No data flow across statements, no source-to-sink reasoning.</p></div>
-        <div class="r"><b>Semgrep</b><p>Matches syntactic patterns. A pattern does not prove the input actually reaches the sink through assignments.</p></div>
-        <div class="r"><b>CodeQL</b><p>A real dataflow engine, but heavy: build a database, learn a query language. Overkill for one file.</p></div>
-        <div class="r"><b>Lint-Owl</b><p>One small binary whose output is the tainted path itself, and an MCP tool an AI asks "does user input reach this exec".</p></div>
-      </div>
-    </section>
+  <section id="how">
+    <h2>How it differs</h2>
+    <div class="rows">
+      <div class="r"><b>Linters</b><p>Flag local smells. No data flow across statements, no source-to-sink reasoning.</p></div>
+      <div class="r"><b>Semgrep</b><p>Matches syntactic patterns. A pattern does not prove the input actually reaches the sink through assignments.</p></div>
+      <div class="r"><b>CodeQL</b><p>A real dataflow engine, but heavy. Build a database, learn a query language. Overkill for one file.</p></div>
+      <div class="r"><b>Lint-Owl</b><p>One small binary whose output is the tainted path itself, and an MCP tool an AI asks "does user input reach this exec".</p></div>
+    </div>
+  </section>
 
-    <section>
-      <h2>Five vulnerability classes.</h2>
-      <p class="lead">Each is a source-and-sink set, so more classes are just data.</p>
-      <div class="chips">
-        <span class="chip">command injection</span>
-        <span class="chip">SQL injection</span>
-        <span class="chip">SSRF</span>
-        <span class="chip">path traversal</span>
-        <span class="chip">insecure deserialization</span>
-      </div>
-    </section>
+  <section id="classes">
+    <h2>Five vulnerability classes.</h2>
+    <p class="lead">Each is a source-and-sink set, so more classes are just data.</p>
+    <div class="chips">
+      <span class="chip">command injection</span>
+      <span class="chip">SQL injection</span>
+      <span class="chip">SSRF</span>
+      <span class="chip">path traversal</span>
+      <span class="chip">insecure deserialization</span>
+    </div>
+  </section>
 
-    <section>
-      <h2>Built in Rust, honest about its limits.</h2>
-      <div class="grid">
-        <div class="cell"><div class="k">Working</div><p>Taint engine with provenance, source-to-sink paths</p></div>
-        <div class="cell"><div class="k">Working</div><p>CLI, HTTP API + console, MCP server</p></div>
-        <div class="cell"><div class="k">Working</div><p>Python-subset front end, 5 vuln classes</p></div>
-        <div class="cell"><div class="k">Next (v0.2)</div><p>Sanitizer awareness and control flow</p></div>
-      </div>
-      <p class="lead" style="margin-top:36px">Results are candidate paths a human confirms. No sanitizer or control-flow awareness yet, and that honesty is written into the README.</p>
-    </section>
+  <section id="source">
+    <h2>Built in Rust, honest about its limits.</h2>
+    <div class="grid">
+      <div class="cell"><div class="k">Working</div><p>Taint engine with provenance, source-to-sink paths</p></div>
+      <div class="cell"><div class="k">Working</div><p>CLI, HTTP API + console, MCP server</p></div>
+      <div class="cell"><div class="k">Working</div><p>Python-subset front end, 5 vuln classes</p></div>
+      <div class="cell"><div class="k">Next (v0.2)</div><p>Sanitizer awareness and control flow</p></div>
+    </div>
+    <p class="lead" style="margin-top:36px">Results are candidate paths a human confirms. No sanitizer or control-flow awareness yet, and that honesty is written into the README.</p>
+  </section>
 
-    <footer>
-      <p>Static analysis that shows the path from input to exploit.</p>
-      <p style="margin-top:14px"><a href="https://github.com/pavanchow/lint-owl">github.com/pavanchow/lint-owl</a></p>
-      <p style="margin-top:14px">By Pavan Nallamothu.</p>
-    </footer>
-  </div>
   <noscript>
-    <div style="max-width:820px;margin:0 auto;padding:40px 28px;color:#57606a">
+    <div class="wrap" style="padding:40px 28px;color:#57606a">
       Lint-Owl is a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink: command injection, SQL injection, SSRF, path traversal, and insecure deserialization across Python, JavaScript, and PHP. It reports the source-to-sink taint path, not just a line number, and ships as a CLI, an HTTP API, an MCP server, and SARIF output for code review and bug bounty. Source at github.com/pavanchow/lint-owl. By Pavan Nallamothu.
     </div>
   </noscript>
-  <script>
+
+  <footer>
+    <p>Static analysis that shows the path from input to exploit.</p>
+    <p style="margin-top:12px"><a href="https://github.com/pavanchow/lint-owl">github.com/pavanchow/lint-owl</a></p>
+    <p style="margin-top:12px">By <span class="name">Pavan Nallamothu</span>.</p>
+  </footer>
+
+<script>
   (function(){
     "use strict";
 
@@ -574,6 +616,6 @@
       init();
     }
   })();
-  </script>
+</script>
 </body>
 </html>
