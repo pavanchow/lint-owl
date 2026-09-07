@@ -1,3 +1,5 @@
+<img src="docs/logo.svg" alt="Lint-Owl logo" width="96">
+
 # Lint-Owl
 
 **A static analyzer whose result is the data-flow path from an untrusted source to a

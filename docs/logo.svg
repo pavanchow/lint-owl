@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Lint-Owl logo">
+  <defs>
+    <linearGradient id="lo-body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6c67ec"/>
+      <stop offset="1" stop-color="#332e9e"/>
+    </linearGradient>
+  </defs>
+  <!-- ear tufts -->
+  <path d="M34 30 L44 14 L52 34 Z" fill="url(#lo-body)"/>
+  <path d="M94 30 L84 14 L76 34 Z" fill="url(#lo-body)"/>
+  <!-- body -->
+  <path d="M64 24 C90 24 102 44 102 68 C102 94 86 108 64 108 C42 108 26 94 26 68 C26 44 38 24 64 24 Z" fill="url(#lo-body)" stroke="#211d63" stroke-width="3"/>
+  <!-- eyes -->
+  <g>
+    <circle cx="49" cy="58" r="16" fill="#f2f0ff" stroke="#211d63" stroke-width="3"/>
+    <circle cx="79" cy="58" r="16" fill="#f2f0ff" stroke="#211d63" stroke-width="3"/>
+    <circle cx="49" cy="58" r="8.5" fill="#22c7e6"/>
+    <circle cx="79" cy="58" r="8.5" fill="#22c7e6"/>
+    <circle cx="49" cy="58" r="4" fill="#151833"/>
+    <circle cx="79" cy="58" r="4" fill="#151833"/>
+  </g>
+  <!-- beak -->
+  <path d="M64 66 L57 66 L64 78 L71 66 Z" fill="#ffb02e" stroke="#211d63" stroke-width="2" stroke-linejoin="round"/>
+  <!-- source-to-sink path the owl watches -->
+  <g stroke="#ffb02e" stroke-width="5" stroke-linecap="round">
+    <circle cx="26" cy="116" r="4.5" fill="#ffb02e" stroke="none"/>
+    <line x1="30" y1="116" x2="96" y2="116"/>
+    <path d="M90 110 L102 116 L90 122" fill="none" stroke-linejoin="round"/>
+  </g>
+</svg>

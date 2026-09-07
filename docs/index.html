@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="logo.svg">
 <title>Lint-Owl: a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink</title>
 <meta name="description" content="Lint-Owl is a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink. Command injection, SQL injection, SSRF, path traversal, insecure deserialization. Agent-native taint analysis for bug bounty and code review. By Pavan Nallamothu (pavanchow).">
 <meta name="author" content="Pavan Nallamothu (pavanchow)">
@@ -110,6 +111,7 @@
   </div></nav>
 
   <div class="hero">
+    <img src="logo.svg" alt="Lint-Owl logo" width="72" height="72">
     <p class="eyebrow">Open source, agent-native</p>
     <h1>Show me the path,<br>not the warning.</h1>
     <p class="sub">Lint-Owl is a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink. It proves that user input actually reaches the exploit, and shows the exact chain.</p>
@@ -122,6 +124,10 @@
   <section id="demo">
     <h2>Run the taint engine yourself.</h2>
     <p class="lead">This box runs a small taint tracer in your browser, built from the same sources, sanitizers, and sinks as the real analyzer. Edit the code and press Scan to see the path it finds.</p>
+    <details>
+      <summary>How to use this playground</summary>
+      <p class="lead">Pick a language, load a preset with the buttons (or paste your own code), then press <b>Scan</b>. Each finding is shown as a source-to-sink chain: the line where untrusted input enters, the lines it flows through, and the dangerous sink it reaches. Try the <b>Sanitized (safe)</b> preset to see how a sanitizer clears taint and produces no finding.</p>
+    </details>
     <div class="stage">
       <div class="card">
         <div class="demo-top">
