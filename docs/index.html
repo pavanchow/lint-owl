@@ -95,6 +95,14 @@
   #demo-output{margin-top:22px}
   .safe-box{border:1px solid var(--line);border-radius:12px;padding:18px 20px;font-family:var(--mono);font-size:14px;color:var(--muted);background:var(--panel2)}
   .demo-caption{font-family:var(--mono);font-size:12px;color:var(--faint);margin-top:16px;text-align:center}
+
+  .term{max-width:720px;margin:40px auto 0;background:#15161c;color:#e9e9ee;border-radius:16px;padding:22px 24px;font-family:var(--mono);font-size:13px;line-height:1.7;overflow-x:auto}
+  .term .c{color:#8a8d99}
+  .term .sev{color:#ff9a9a;font-weight:700}
+  .term .lbl{color:#f0b072}
+  .term .ok{color:#86efac}
+  .cmd{max-width:640px;margin:36px auto 0;background:#15161c;color:#e9e9ee;border-radius:14px;padding:20px 22px;font-family:var(--mono);font-size:13px;line-height:1.9;overflow-x:auto}
+  .cmd .c{color:#8a8d99}
 </style>
 <link rel="author" href="https://github.com/pavanchow">
 <script type="application/ld+json">
@@ -160,6 +168,22 @@
     </div>
   </section>
 
+  <section id="cli">
+    <h2>The same path, in your terminal.</h2>
+    <p class="lead">The CLI prints each finding as a source-to-sink chain and exits non-zero, so it drops straight into CI or a pre-commit hook.</p>
+    <div class="term" aria-hidden="true">
+<span class="c">$ lint-owl scan app.py</span><br>
+== app.py ==<br>
+<span class="sev">command-injection [critical]</span>: tainted data reaches a command-injection sink<br>
+&nbsp;&nbsp;<span class="lbl">[source]</span> line 1: host = request.args.get("host")<br>
+&nbsp;&nbsp;<span class="lbl">[flows]</span> line 2: cmd = "ping -c 1 " + host<br>
+&nbsp;&nbsp;<span class="lbl">[sink]</span> line 3: os.system(cmd)<br>
+<br>
+<span class="ok">1 tainted path(s) across 1 file(s)</span>
+    </div>
+    <p class="demo-caption">real CLI output. a known sanitizer (int, shlex.quote) on the path clears the taint and the finding disappears</p>
+  </section>
+
   <section id="how">
     <h2>How it differs</h2>
     <div class="rows">
@@ -171,26 +195,34 @@
   </section>
 
   <section id="classes">
-    <h2>Five vulnerability classes.</h2>
-    <p class="lead">Each is a source-and-sink set, so more classes are just data.</p>
-    <div class="chips">
-      <span class="chip">command injection</span>
-      <span class="chip">SQL injection</span>
-      <span class="chip">SSRF</span>
-      <span class="chip">path traversal</span>
-      <span class="chip">insecure deserialization</span>
+    <h2>The classes it tracks.</h2>
+    <p class="lead">Each class is just a set of sources, sinks, and sanitizers, so adding one is data, not code. Point <code>--config</code> at a JSON file to add your framework's own.</p>
+    <div class="grid">
+      <div class="cell"><div class="k">command injection &middot; critical</div><p>Untrusted input reaches os.system, subprocess, os.popen, eval, exec, or child_process.exec.</p></div>
+      <div class="cell"><div class="k">SQL injection &middot; critical</div><p>Concatenated input reaches a cursor.execute, executemany, or query call.</p></div>
+      <div class="cell"><div class="k">SSRF &middot; high</div><p>Input reaches requests, urllib.urlopen, httpx, fetch, axios, or an http client.</p></div>
+      <div class="cell"><div class="k">path traversal &middot; high</div><p>Input reaches open, fs.readFile, or fs.createReadStream without normalization.</p></div>
+      <div class="cell"><div class="k">insecure deserialization &middot; critical</div><p>Input reaches pickle.loads, yaml.load, marshal.loads, or dill.loads.</p></div>
+      <div class="cell"><div class="k">sanitizer aware</div><p>int, float, shlex.quote, encodeURIComponent, and friends clear taint, so quoted or cast input is not flagged.</p></div>
     </div>
   </section>
 
   <section id="source">
-    <h2>Built in Rust, honest about its limits.</h2>
-    <div class="grid">
-      <div class="cell"><div class="k">Working</div><p>Taint engine with provenance, source-to-sink paths</p></div>
-      <div class="cell"><div class="k">Working</div><p>CLI, HTTP API + console, MCP server</p></div>
-      <div class="cell"><div class="k">Working</div><p>Python-subset front end, 5 vuln classes</p></div>
-      <div class="cell"><div class="k">Next (v0.2)</div><p>Sanitizer awareness and control flow</p></div>
+    <h2>One Rust binary, every surface.</h2>
+    <div class="rows">
+      <div class="r"><b>CLI</b><p>Scan a file or a whole tree of Python, JavaScript, and PHP. Exits non-zero on findings, so it drops into CI or a pre-commit hook.</p></div>
+      <div class="r"><b>SARIF and JSON</b><p><code>--sarif</code> emits SARIF 2.1.0 for GitHub code scanning and IDEs. <code>--json</code> gives the raw findings for any other tool.</p></div>
+      <div class="r"><b>HTTP API and console</b><p><code>serve --port 8080</code> opens a paste-code console and a <code>/scan</code> endpoint that returns the same source-to-sink chains.</p></div>
+      <div class="r"><b>MCP server</b><p>The <code>lint_owl_scan</code> tool over stdio, so an agent reviewing a diff can ask "does user input reach a sink here" and get the chain back.</p></div>
     </div>
-    <p class="lead" style="margin-top:36px">Results are candidate paths a human confirms. No sanitizer or control-flow awareness yet, and that honesty is written into the README.</p>
+    <div class="cmd">
+<span class="c"># one file, a whole repo, SARIF for CI, or an agent tool</span><br>
+lint-owl scan app.py<br>
+lint-owl scan path/to/repo --sarif<br>
+lint-owl serve --port 8080<br>
+lint-owl mcp
+    </div>
+    <p class="lead" style="margin-top:36px">Sanitizer awareness and control-flow and inter-procedural taint are built in. Findings are still candidate paths a human confirms, and that honesty is written into the README.</p>
   </section>
 
   <noscript>
