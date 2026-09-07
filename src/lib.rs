@@ -239,9 +239,28 @@ pub fn analyze(src: &str) -> Vec<Finding> {
 /// Analyze with an explicit config (custom sources/sinks, or another language).
 pub fn analyze_cfg(src: &str, cfg: &Config) -> Vec<Finding> {
     let (top, funcs) = parse_program(src);
+    analyze_scopes(&top, &funcs, cfg)
+}
+
+/// Analyze the top-level statements and every user-defined function body, each as
+/// its own entry scope. Analyzing bodies independently catches an internal source
+/// (e.g. `request.args.get` inside a handler) that reaches a sink even when the
+/// function is never called from analyzed code; a body reached only through a
+/// tainted parameter still fires via the inter-procedural call path. Findings are
+/// deduplicated so a function analyzed both ways is reported once.
+fn analyze_scopes(top: &[Stmt], funcs: &HashMap<String, Func>, cfg: &Config) -> Vec<Finding> {
     let mut findings = Vec::new();
     let visited = std::collections::HashSet::new();
-    taint_scope(&top, HashMap::new(), &funcs, 0, cfg, &mut findings, &visited);
+    taint_scope(top, HashMap::new(), funcs, 0, cfg, &mut findings, &visited);
+    let mut names: Vec<&String> = funcs.keys().collect();
+    names.sort();
+    for name in names {
+        let mut v = std::collections::HashSet::new();
+        v.insert(name.clone());
+        taint_scope(&funcs[name].body, HashMap::new(), funcs, 0, cfg, &mut findings, &v);
+    }
+    let mut seen = std::collections::HashSet::new();
+    findings.retain(|f| seen.insert((f.vuln.clone(), f.path.clone())));
     findings
 }
 
@@ -1112,10 +1131,7 @@ pub fn analyze_lang(src: &str, lang: Lang, cfg: &Config) -> Vec<Finding> {
         Lang::Js => (flat_program(src, js_statements(src), Lang::Js), HashMap::new()),
         Lang::Php => (flat_program(src, php_statements(src), Lang::Php), HashMap::new()),
     };
-    let mut findings = Vec::new();
-    let visited = std::collections::HashSet::new();
-    taint_scope(&top, HashMap::new(), funcs_ref(&funcs), 0, cfg, &mut findings, &visited);
-    findings
+    analyze_scopes(&top, funcs_ref(&funcs), cfg)
 }
 
 fn funcs_ref(f: &HashMap<String, Func>) -> &HashMap<String, Func> {
@@ -1751,6 +1767,17 @@ mod tests {
         let src = "def inner(c):\n    os.system(c)\n\ndef outer(v):\n    inner(v)\n\nouter(input())\n";
         let f = analyze(src);
         assert_eq!(f.len(), 1);
+    }
+
+    #[test]
+    fn internal_source_in_uncalled_function_is_found() {
+        // The source originates inside a function body that nothing calls. The
+        // body must still be analyzed as its own scope.
+        let src = "def handle(request):\n    host = request.args.get(\"host\")\n    cmd = \"ping \" + host\n    os.system(cmd)\n";
+        let f = analyze(src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln, "command-injection");
+        assert_eq!(f[0].path, vec![2, 3, 4]);
     }
 
     #[test]

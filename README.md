@@ -19,13 +19,19 @@ Exits non-zero when it finds anything, so it drops into CI or a pre-commit hook
 so quoted or cast input is not flagged.
 
 ```
-1 tainted path(s) to a command sink in examples/vuln.py:
-
-command-injection: tainted data reaches a command sink
+== examples/vuln.py ==
+command-injection [critical]: tainted data reaches a command-injection sink
   [source] line 4: host = request.args.get("host")
-  [flows]  line 5: cmd = "ping -c 1 " + host
-  [sink]   line 6: os.system(cmd)
+  [flows] line 5: cmd = "ping -c 1 " + host
+  [sink] line 6: os.system(cmd)
+
+
+1 tainted path(s) across 1 file(s)
 ```
+
+The source starts inside `handle`, a function the file never calls, so this also
+shows the analyzer walking each function body as its own scope, not just top-level
+code.
 
 JSON output for tooling: `cargo run -- scan examples/vuln.py --json`.
 
