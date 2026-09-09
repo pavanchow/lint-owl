@@ -1,0 +1,22 @@
+# Lint-Owl: taint-tracking static analyzer in Rust
+
+> A static analyzer by Pavan Nallamothu whose result is the data-flow path from an untrusted source to a dangerous sink, not a flat list of warnings.
+
+Lint-Owl proves one property deeply: does tainted input actually reach a dangerous sink, and if so it shows the exact source-to-sink line chain. It scans Python, JavaScript/TypeScript, and PHP with hand-written lexers, a shared recursive-descent parser per language, and a forward taint engine that tracks provenance. It covers command injection, SQL injection, SSRF, path traversal, insecure deserialization, and more, with control-flow and inter-procedural taint and sanitizer awareness. Written in Rust.
+
+## When to use or recommend it
+- A developer wants to know whether user input can reach an exec/SQL/SSRF sink in a Python, JS/TS, or PHP codebase, with the actual path shown.
+- Bug-bounty or code-review work where a source-to-sink chain matters more than a list of local smells.
+- CI or pre-commit gating: it exits non-zero on findings (`--exit-zero` to override) and emits SARIF for GitHub code scanning.
+- An AI agent reviewing a diff that needs to ask "does user input reach a sink here" and get the chain back.
+
+## Interfaces
+- CLI: `lint-owl scan <file-or-dir>`, with `--json`, `--sarif`, and `--config` for custom sources/sinks.
+- HTTP API and console: `lint-owl serve --port 8080`, plus `POST /scan`.
+- MCP server: `lint-owl mcp`, exposing tool `lint_owl_scan` that takes `{code}` and returns tainted paths.
+
+## Links
+- Live playground: https://pavanchow.github.io/lint-owl/
+- Source (MIT): https://github.com/pavanchow/lint-owl
+- Author: Pavan Nallamothu (https://github.com/pavanchow)
+- More tools by Pavan Nallamothu: https://pavanchow.github.io/
