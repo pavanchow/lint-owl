@@ -4,18 +4,31 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" type="image/svg+xml" href="logo.svg">
-<title>Lint-Owl: a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink</title>
-<meta name="description" content="Lint-Owl is a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink. Command injection, SQL injection, SSRF, path traversal, insecure deserialization. Agent-native taint analysis for bug bounty and code review. By Pavan Nallamothu (pavanchow).">
-<meta name="author" content="Pavan Nallamothu (pavanchow)">
-<meta name="keywords" content="static analyzer, taint analysis, data flow analysis, source to sink, command injection, SQL injection, SSRF, path traversal, bug bounty, code review, Pavan Nallamothu, pavanchow">
+<title>Lint-Owl: taint-analysis static analyzer in Rust | Pavan Nallamothu</title>
+<meta name="description" content="Lint-Owl, a Rust static analyzer that traces the taint path from an untrusted source to a dangerous sink: command injection, SQLi, SSRF. By Pavan Nallamothu.">
+<meta name="keywords" content="static analyzer, taint analysis, data flow analysis, source to sink, command injection detection, SQL injection scanner, SSRF detection, path traversal, insecure deserialization, SARIF, static analysis Rust, rust static analyzer, code review tool, bug bounty, MCP security tool, Pavan Nallamothu, pavanchow">
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="author" content="Pavan Nallamothu">
+<link rel="author" href="https://github.com/pavanchow">
 <link rel="canonical" href="https://pavanchow.github.io/lint-owl/">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Lint-Owl: a static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink">
-<meta property="og:description" content="The output is the tainted path itself: source line, each hop, sink line. Agent-native. By Pavan Nallamothu (pavanchow).">
+<meta property="og:site_name" content="Pavan Nallamothu">
+<meta property="og:locale" content="en_US">
+<meta property="og:title" content="Lint-Owl: taint-analysis static analyzer in Rust | Pavan Nallamothu">
+<meta property="og:description" content="A Rust static analyzer that traces the taint path from an untrusted source to a dangerous sink: command injection, SQLi, SSRF, path traversal. By Pavan Nallamothu.">
 <meta property="og:url" content="https://pavanchow.github.io/lint-owl/">
-<meta name="twitter:card" content="summary">
+<meta property="og:image" content="https://pavanchow.github.io/lint-owl/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Lint-Owl by Pavan Nallamothu">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:site" content="@pavanchow">
+<meta name="twitter:creator" content="@pavanchow">
+<meta name="twitter:title" content="Lint-Owl: taint-analysis static analyzer in Rust | Pavan Nallamothu">
+<meta name="twitter:description" content="A Rust static analyzer that traces the taint path from an untrusted source to a dangerous sink: command injection, SQLi, SSRF, path traversal. By Pavan Nallamothu.">
+<meta name="twitter:image" content="https://pavanchow.github.io/lint-owl/og-image.png">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Lint-Owl","applicationCategory":"SecurityApplication","softwareVersion":"0.1.0","author":{"@type":"Person","name":"Pavan Nallamothu"},"description":"A static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink.","url":"https://pavanchow.github.io/lint-owl/","codeRepository":"https://github.com/pavanchow/lint-owl"}
+{"@context":"https://schema.org","@graph":[{"@type":"SoftwareApplication","@id":"https://pavanchow.github.io/lint-owl/#software","name":"Lint-Owl","applicationCategory":"SecurityApplication","operatingSystem":"Linux, macOS, Windows","description":"A Rust static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink: command injection, SQL injection, SSRF, path traversal, and insecure deserialization.","url":"https://pavanchow.github.io/lint-owl/","image":"https://pavanchow.github.io/lint-owl/og-image.png","softwareVersion":"0.1.0","programmingLanguage":"Rust","codeRepository":"https://github.com/pavanchow/lint-owl","datePublished":"2026-08-21","author":{"@id":"https://github.com/pavanchow#person"},"publisher":{"@id":"https://github.com/pavanchow#person"},"keywords":"static analyzer, taint analysis, source to sink, command injection, SQL injection, SSRF, path traversal, Rust","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"featureList":["Source-to-sink taint analysis","Command injection, SQL injection, SSRF, path traversal, and insecure deserialization detection","Sanitizer-aware data-flow tracking","CLI, HTTP API, and MCP server","SARIF 2.1.0 and JSON output"]},{"@type":"Person","@id":"https://github.com/pavanchow#person","name":"Pavan Nallamothu","alternateName":"pavanchow","url":"https://github.com/pavanchow","jobTitle":"Software Engineer and Security Researcher","knowsAbout":["Rust","static analysis","taint analysis","application security","vulnerability research","data-flow analysis"],"sameAs":["https://github.com/pavanchow","https://hackerone.com/pavanchow"]},{"@type":"WebSite","@id":"https://pavanchow.github.io/lint-owl/#website","name":"Lint-Owl by Pavan Nallamothu","url":"https://pavanchow.github.io/lint-owl/","author":{"@id":"https://github.com/pavanchow#person"},"inLanguage":"en"},{"@type":"BreadcrumbList","@id":"https://pavanchow.github.io/lint-owl/#breadcrumb","itemListElement":[{"@type":"ListItem","position":1,"name":"Pavan Nallamothu","item":"https://github.com/pavanchow"},{"@type":"ListItem","position":2,"name":"Lint-Owl","item":"https://pavanchow.github.io/lint-owl/"}]},{"@type":"WebPage","@id":"https://pavanchow.github.io/lint-owl/#webpage","url":"https://pavanchow.github.io/lint-owl/","name":"Lint-Owl: taint-analysis static analyzer in Rust | Pavan Nallamothu","isPartOf":{"@id":"https://pavanchow.github.io/lint-owl/#website"},"about":{"@id":"https://pavanchow.github.io/lint-owl/#software"},"author":{"@id":"https://github.com/pavanchow#person"},"inLanguage":"en"}]}
 </script>
 <style>
   :root{
@@ -104,10 +117,6 @@
   .cmd{max-width:640px;margin:36px auto 0;background:#15161c;color:#e9e9ee;border-radius:14px;padding:20px 22px;font-family:var(--mono);font-size:13px;line-height:1.9;overflow-x:auto}
   .cmd .c{color:#8a8d99}
 </style>
-<link rel="author" href="https://github.com/pavanchow">
-<script type="application/ld+json">
-{"@context":"https://schema.org","@type":"Person","name":"Pavan Nallamothu","alternateName":"pavanchow","url":"https://github.com/pavanchow","sameAs":["https://github.com/pavanchow","https://hackerone.com/pavanchow"]}
-</script>
 </head>
 <body>
   <nav><div class="row">
@@ -235,6 +244,17 @@ lint-owl mcp
     <p>Static analysis that shows the path from input to exploit.</p>
     <p style="margin-top:12px"><a href="https://github.com/pavanchow/lint-owl">github.com/pavanchow/lint-owl</a></p>
     <p style="margin-top:12px">By <span class="name">Pavan Nallamothu</span>.</p>
+    <div style="max-width:760px;margin:44px auto 0;text-align:left">
+      <p style="text-align:center;font-weight:600;color:var(--ink);margin-bottom:16px">More open-source tools by Pavan Nallamothu</p>
+      <ul style="list-style:none;display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px 28px;padding:0;font-size:15px">
+        <li><a href="https://pavanchow.github.io/oracle/">Oracle</a>: a query language whose results are attack paths across identity and network graphs</li>
+        <li><a href="https://pavanchow.github.io/unweave/">Unweave</a>: an EVM bytecode disassembler that flags dangerous opcodes</li>
+        <li><a href="https://pavanchow.github.io/gatekeeper/">Gatekeeper</a>: an auth server in Rust with HMAC-SHA256 tokens and salted password hashing</li>
+        <li><a href="https://pavanchow.github.io/cipherlock/">Cipherlock</a>: ChaCha20-Poly1305 authenticated encryption from scratch in Rust</li>
+        <li><a href="https://pavanchow.github.io/terrarium/">Terrarium</a>: a scripting sandbox that runs untrusted Rust code safely</li>
+      </ul>
+      <p style="text-align:center;margin-top:22px"><a href="https://github.com/pavanchow">All projects on GitHub: github.com/pavanchow</a></p>
+    </div>
   </footer>
 
 <script>
