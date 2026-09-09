@@ -1,6 +1,7 @@
 [package]
 name = "lint-owl"
 version = "0.1.0"
+license = "MIT"
 edition = "2021"
 description = "A static analyzer whose result is the data-flow path from an untrusted source to a dangerous sink"
 
