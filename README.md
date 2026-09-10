@@ -10,6 +10,8 @@ source-to-sink chain. Built for real bug-bounty and code-review work.
 
 **[Live demo](https://pavanchow.github.io/lint-owl/)** · MIT licensed · written in Rust
 
+Built from scratch by [Pavan Nallamothu](https://pavanchow.github.io/) ([LinkedIn](https://www.linkedin.com/in/pavanchow/), [GitHub](https://github.com/pavanchow)).
+
 ## Try it
 
 ```
